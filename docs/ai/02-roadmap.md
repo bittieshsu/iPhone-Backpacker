@@ -21,16 +21,29 @@
 
 ---
 
-## 階段 1 — 抽出 core/ ⬜ 未開始
+## 階段 1 — 抽出 core/ ✅ 程式碼完成，待 Windows 實測
 
-- [ ] 建立 `core/` 骨架，實作 `errors.py` / `shell_ns.py` / `filters.py` / `listing.py`
-- [ ] 移除 `print` / `tqdm` / `assert`，改 `logging` + 例外
-- [ ] 刪除字串路徑解析層（`parseAbsName` / `iter_split` / `checkFolderName` /
-      `getFolderObject_byAbsPath` / `ChineseCharacterChecking`）
-- [ ] `copier.py`：`plan_copy` / `run_copy`，介面收 `list[FileEntry]`
-- [ ] 目的地改用 `SHCreateItemFromParsingName`，不走 shell 樹（省掉一整條路徑）
+- [x] 建立 `iphone_backpacker/core/` 骨架
+      （`errors` / `logging_setup` / `filters` / `shell_ns` / `listing` / `copier`）
+- [x] 零 `print` / 零 `tqdm` / 零 `assert`，改 `logging` 寫檔 + 例外
+- [x] 新 core 完全不含字串路徑解析，位置一律以絕對 PIDL 交換
+- [x] `copier.py`：`plan_copy` / `run_copy`，streaming pipeline，排程單位是檔案
+- [x] 目的地改用 `SHCreateItemFromParsingName`（`shell_ns.item_from_path`），不走 shell 樹
+- [x] `tests/test_filters.py` —— 純 Python 單元測試，11 項通過
+- [x] `tools/smoke_local.py` —— Windows 上的煙霧測試腳本
+- [ ] **⚠ 待使用者在 Windows 上跑 `tools/smoke_local.py` 驗證**
+- [ ] 舊的 `iphoneCopyOneFolder.py` / `iphoneCopyByConfig.py` / `EditThis.txt` 移除
+      → **刻意延後到 GUI 可用之後**，在那之前它們是使用者唯一能用的工具
 
-**驗證方式**：用一支小測試腳本在**本機資料夾**上跑通（不需要 iPhone）。
+### 這個階段有意識留下的未決點
+
+- `IEnumIDList.Next()` 在不同 pywin32 版本的簽章可能不同，
+  `shell_ns._enum_pidls()` 已寫了「先試批次、失敗退回單筆」的保險，實測後再收斂。
+- 增量去重目前**只比對檔名不比對大小**。取來源檔案大小在 MTP 上要每個項目
+  一次 `GetDetailsOf` 來回，成本會抵銷掉增量備份省下的時間。
+  iPhone 的 `IMG_xxxx` 檔名在同一資料夾內本來就唯一，先這樣。
+
+**驗證方式**：`python tools/smoke_local.py <來源> <目的地>`，在**本機資料夾**上跑（不需要 iPhone）。
 
 ---
 
