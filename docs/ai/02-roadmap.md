@@ -47,17 +47,25 @@
 
 ---
 
-## 階段 2 — 裝置偵測 ⬜ 未開始
+## 階段 2 — 裝置偵測 ✅ 程式碼完成，待 iPhone 實測
 
-- [ ] `device.py`：`find_portable_devices()` 用 `CSIDL_DRIVES` + `SHGDN_FORPARSING`，語言中立
-- [ ] `probe()` 判斷 OK / NOT_FOUND / LOCKED_OR_UNTRUSTED
-- [ ] `find_photo_folders()` 遞迴掃描（限深度 3，用 `folder_has_media()` 早退）
-- [ ] **★ 效能 benchmark（先做，別用猜的）** —— 在真實 iPhone 上量測並記錄到
-      `04-shell-com-notes.md`：
-  - `list_subfolders()` 展開 DCIM 一層要多久？（目標 < 0.5s）
-  - `SHCONTF_FOLDERS` 有沒有真的省到？跟不帶該旗標比較
-  - 第一次觸碰裝置的 warm-up 成本是多少？
-  - 含 5000 張照片的資料夾 `iter_files()` 完整列舉要多久？
+- [x] `device.py`：`find_portable_devices()` 用 `SFGAO_FOLDER && !SFGAO_FILESYSTEM`
+      判斷，語言中立、不受使用者把手機改名影響
+- [x] `probe()` / `detect()` 判斷 OK / NOT_FOUND / LOCKED_OR_UNTRUSTED
+- [x] `status_message()` 產生使用者看得懂的提示（「請解鎖並點信任」）
+- [x] `find_photo_folders()` 遞迴掃描，用 `folder_has_media()` 早退、可取消
+- [x] `tools/smoke_device.py` benchmark 腳本
+- [ ] **⚠ 待使用者實測**：`python tools/smoke_device.py`
+      **要跑兩次 —— 一次拔掉 iPhone、一次插著**，才有對照組
+- [ ] 把量到的數字寫回 `04-shell-com-notes.md`
+
+### benchmark 要回答的問題
+
+1. 列出「本機」有插/沒插 iPhone 差多少？（階段 1 量到 774ms，需要對照組）
+2. 展開 iPhone 資料夾一層要多久？進得了 0.5 秒嗎？
+3. **`SHCONTF_FOLDERS` 在 MTP 上有沒有真的省到？** ← 最關鍵的未知數，腳本有 A/B 對照
+4. `folder_has_media()` 早退相對完整列舉省了多少？
+5. 第一次觸碰裝置的 warm-up 成本是多少？
 
 **驗證方式**：插拔 iPhone、鎖定/解鎖、點/不點「信任」，三種狀態都要正確回報。
 **效能不達標就先解決效能再往下**，這是專案存在的理由（見 D8）。
