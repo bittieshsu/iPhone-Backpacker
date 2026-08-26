@@ -101,15 +101,23 @@ def list_subfolders(abs_pidl, cache=None):
     return entries
 
 
-def folder_has_media(abs_pidl, categories=MEDIA, probe_limit=200):
+def folder_has_media(abs_pidl, categories=MEDIA, probe_limit=200,
+                     batch=shell_ns.PROBE_BATCH):
     """這個資料夾裡有沒有目標類型的檔案？
 
     ★ 找到第一個就立刻回 True，絕不數完 ——
       否則「自動尋找照片資料夾」會變成掃描整支手機。
     probe_limit 是保險上限，避免在超大資料夾裡白跑。
+
+    ★★ batch 用 PROBE_BATCH（小）而不是 DEFAULT_BATCH。
+      MTP 的成本是「每個被實體化的項目 ~10ms」，而 Next(n) 不管你要
+      幾筆都會準備 n 筆。用 64 去問「有沒有照片」等於付 64 筆的錢拿
+      1 筆的答案 —— 實測在 421 項的資料夾上，取 1 筆和取 50 筆都是
+      ~720ms。早退要真的省到，批次就必須跟著小。
     """
     seen = 0
-    for _, name, _ in shell_ns.iter_entries(abs_pidl, flags=shell_ns.FILES_ONLY):
+    for _, name, _ in shell_ns.iter_entries(abs_pidl, flags=shell_ns.FILES_ONLY,
+                                            batch=batch):
         if matches(name, categories):
             return True
         seen += 1
@@ -125,7 +133,8 @@ def is_empty(abs_pidl):
     用來偵測「iPhone 沒解鎖 / 沒點信任」—— 那種情況 Shell 會把資料夾
     列舉成空的而不是回報錯誤，不主動判斷的話使用者只會看到一片空白。
     """
-    for _ in shell_ns.iter_entries(abs_pidl, flags=shell_ns.EVERYTHING):
+    # 只需要知道「有沒有第一筆」，批次用 1 就好（理由同 folder_has_media）。
+    for _ in shell_ns.iter_child_pidls(abs_pidl, flags=shell_ns.EVERYTHING, batch=1):
         return False
     return True
 

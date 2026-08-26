@@ -27,7 +27,20 @@ FOLDERS_ONLY = shellcon.SHCONTF_FOLDERS
 FILES_ONLY = shellcon.SHCONTF_NONFOLDERS
 EVERYTHING = shellcon.SHCONTF_FOLDERS | shellcon.SHCONTF_NONFOLDERS
 
-_ENUM_BATCH = 64
+# ★ 批次大小是 MTP 上最重要的效能參數（2026-08-27 實測發現）。
+#
+# 實測顯示成本 ≈ 每個「被實體化的項目」~10ms，而 Next(n) 不管呼叫端
+# 實際要幾筆，都會把 n 筆準備好。所以：
+#   - 需要「全部」時：批次大小影響不大，反正每一筆都要付錢。
+#   - 只需要「前幾筆」時（早退）：批次大小就是全部的成本。
+#     用 64 去問「這資料夾有沒有照片」等於付 64 筆的錢拿 1 筆的答案。
+#
+# 證據：在 421 項的資料夾上，取 1 筆 / 10 筆 / 50 筆都是 ~720ms（一次
+# Next(64)），取 200 筆跳到 2654ms（四次），取 421 筆是 4258ms（七次）。
+DEFAULT_BATCH = 64
+PROBE_BATCH = 4     # 早退式探測用：只想知道「有沒有」，不想付整批的錢
+
+_ENUM_BATCH = DEFAULT_BATCH   # 保留舊名稱
 
 
 @contextlib.contextmanager
@@ -128,11 +141,14 @@ def pidl_from_path(path):
     return as_pidl(pidl)
 
 
-def _enum_pidls(folder, flags):
+def _enum_pidls(folder, flags, batch=DEFAULT_BATCH):
     """列舉子項的相對 PIDL。
 
+    batch 直接決定 Next() 一次要求幾筆 —— 在 MTP 上這是主要的成本來源，
+    見上方 DEFAULT_BATCH / PROBE_BATCH 的說明。
+
     pywin32 各版本 IEnumIDList.Next() 的簽章不完全一致，
-    所以先試批次、失敗再退回單筆。開發機是 Linux 無法實測，這是刻意的保險。
+    所以先試批次、失敗再退回單筆。
     """
     try:
         enumerator = folder.EnumObjects(0, flags)
@@ -141,7 +157,6 @@ def _enum_pidls(folder, flags):
     if enumerator is None:          # 空資料夾在某些 shell extension 上會回 None
         return
 
-    batch = _ENUM_BATCH
     while True:
         try:
             chunk = enumerator.Next(batch)
@@ -159,7 +174,7 @@ def _enum_pidls(folder, flags):
             yield rel_pidl
 
 
-def iter_child_pidls(abs_pidl, flags=EVERYTHING):
+def iter_child_pidls(abs_pidl, flags=EVERYTHING, batch=DEFAULT_BATCH):
     """只列舉子項的絕對 PIDL，不取顯示名稱。
 
     給效能量測與「只需要數量/位置、不需要名字」的場合用。
@@ -167,18 +182,19 @@ def iter_child_pidls(abs_pidl, flags=EVERYTHING):
     所以把「有沒有取名字」拆成兩支函式才量得出來。
     """
     folder = bind_folder(abs_pidl)
-    for rel_pidl in _enum_pidls(folder, flags):
+    for rel_pidl in _enum_pidls(folder, flags, batch):
         yield combine(abs_pidl, rel_pidl)
 
 
-def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False):
+def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False,
+                 batch=DEFAULT_BATCH):
     """列舉一層，yield (child_abs_pidl, name, attributes)。
 
     want_attributes=False 時 attributes 為 None。
     取屬性要多一次 COM 呼叫，非必要不取（MTP 上每一次來回都是成本）。
     """
     folder = bind_folder(abs_pidl)
-    for rel_pidl in _enum_pidls(folder, flags):
+    for rel_pidl in _enum_pidls(folder, flags, batch):
         try:
             name = folder.GetDisplayNameOf(rel_pidl, shellcon.SHGDN_NORMAL)
         except pythoncom.com_error as exc:
