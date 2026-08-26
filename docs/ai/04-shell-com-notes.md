@@ -118,16 +118,27 @@ shell.SHCreateItemFromParsingName(str(dest_path), None, shell.IID_IShellItem)
 - 「本機」底下同時列出磁碟機（`OS (C:)`）、使用者資料夾（`下載`/`圖片`/`桌面`…）
   與 `Apple iPhone`，證實 `SFGAO_FOLDER && !SFGAO_FILESYSTEM` 這個判斷有東西可分。
 
-### ★ 待釐清：「本機」列舉的 774 ms
+### 「本機」列舉的 ~770 ms —— 已釐清，**不是** MTP warm-up
 
-量測當下**插著 iPhone**。高度懷疑這 774 ms 主要是 Shell 為了 MTP 裝置
-開啟 WPD session 的 warm-up 成本，而不是列舉本身。
+**2026-08-27 實測對照組：**
 
-**階段 2 必須做「有插 / 沒插」兩組對照**（`tools/smoke_device.py` 已內建這個量測）。
+| | 沒插 iPhone | 插著 iPhone |
+|---|---|---|
+| 列出「本機」（冷） | 772.7 ms | 768.5 ms |
+| 列出「本機」（熱） | 484.8 ms | 503.7 ms |
+| `find_portable_devices()` | 476.3 ms | 498.7 ms |
+| `probe()` | — | 860.0 ms |
 
-若確認是裝置 warm-up：這是**一次性**成本，設計上的正解是
-**UI 啟動時不要同步等它** —— 先畫出視窗與「正在偵測裝置…」狀態，
-偵測在背景執行緒跑完再填樹。使用者感受到的是「立刻開啟」而不是「卡 0.8 秒」。
+兩組幾乎一模一樣 → **這是列舉「本機」本身的固有成本，跟 iPhone 無關。**
+（原本假設是 Shell 為 MTP 開 WPD session 的 warm-up，**該假設已被推翻。**）
+
+最可能的來源：測試機上有 `SDXC (D:)` 與 `USB 磁碟機 (F:)`，
+可移除式磁碟機要查媒體狀態與磁碟區標籤，這在 Shell 列舉時是同步的。
+
+**設計結論（不變，但理由不同）**：裝置偵測總成本約
+`列舉本機 ~500ms + find_portable_devices ~500ms + probe ~860ms ≈ 1.9 秒`。
+**UI 啟動絕不能同步等它** —— 先畫出視窗與「正在偵測裝置…」狀態，
+偵測在背景執行緒跑完再填樹。
 
 ### 另一個實測發現：`IFileOperation` 有固定啟動成本
 
@@ -137,10 +148,33 @@ shell.SHCreateItemFromParsingName(str(dest_path), None, shell.IID_IShellItem)
 **設計含意**：chunk 不能切太小，否則固定成本會被乘上批次數。
 `chunk_size=200` 的預設值是合理的，不要為了進度更新頻繁而調小。
 
-### 待量測（階段 2）
+### iPhone 實測（2026-08-27，一支有 50~100 個資料夾的 iPhone）
 
-`SHCONTF_FOLDERS` 在 iPhone 的 MTP shell extension 上
-是否真的只走訪資料夾、還是內部仍列舉全部再過濾。`tools/smoke_device.py` 會做 A/B 對照。
+| 操作 | 耗時 | 判讀 |
+|---|---|---|
+| 展開 `Apple iPhone`（1 個子項） | 13.2 ms | 快 |
+| **展開 `Internal Storage`（50~100 個子項）** | **2772.1 ms** | **★ 主要瓶頸** |
+| 展開葉節點 `200101__`（2 個項目） | 98.2 ms | |
+| 同一節點再展開（快取命中） | < 0.1 ms | 快取有效 |
+| 單次列舉的固定開銷 | **~45 ms** | 見下 |
+
+**★ MTP 每次列舉有 ~45ms 的固定開銷。**
+證據：在只有 2 個項目的葉節點上，三種旗標分別量到 44.0 / 47.8 / 48.3 ms ——
+內容幾乎不影響，全是固定成本。
+
+這個數字的設計含意很大：**任何「對每個資料夾都做一次列舉」的演算法，
+在 100 個資料夾的裝置上光固定開銷就是 4.5 秒**，而 `find_photo_folders`
+初版對每個資料夾做**兩次**列舉（`folder_has_media` + `list_subfolders`）。
+實測跑了 20 分鐘沒有結束，這就是原因之一。
+
+### ★ 仍未回答：`SHCONTF_FOLDERS` 到底有沒有省到
+
+第一版 benchmark **跑在只有 2 個項目的葉節點上**，量到的全是固定開銷，
+印出來的「只省 8%」結論**無效，不要採信**。
+
+`tools/smoke_device.py` v2 已改成自動挑「子資料夾最多」的那一層來測
+（對 iPhone 就是 `Internal Storage`），並在項目數 < 20 時直接拒絕下結論。
+**這個問題會決定階段 3 的 UI 要不要走骨架畫面備案，重測前不要開始寫 GUI。**
 
 ---
 

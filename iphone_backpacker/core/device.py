@@ -24,7 +24,9 @@ from .listing import FileEntry, folder_has_media, is_empty, list_subfolders
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SCAN_DEPTH = 3
+# iPhone 的結構是 裝置 / Internal Storage / <照片資料夾>，深度 2 就夠。
+# 舊版預設 3 會多掃一整層，在 50~100 個資料夾的裝置上是數倍的代價。
+DEFAULT_SCAN_DEPTH = 2
 
 
 class DeviceStatus(Enum):
@@ -77,7 +79,10 @@ def find_portable_devices():
 
         try:
             parsing = shell_ns.parsing_name(child_abs)
-        except Exception:   # noqa: BLE001 - 診斷用資訊，取不到不該影響偵測
+        except Exception as exc:   # noqa: BLE001 - 診斷用，取不到不該影響偵測
+            # 實測 iPhone 這裡會失敗（SHBindToParent 對 MTP 根節點不見得可用）。
+            # 我們不靠 parsing name 做判斷，純粹是診斷資訊，失敗就算了。
+            log.debug("取不到解析名稱（%s）：%s", name, exc)
             parsing = ""
 
         entry = FileEntry(name=name, is_dir=True, abs_pidl=child_abs)
@@ -116,37 +121,60 @@ def detect():
 
 
 def find_photo_folders(root, categories=MEDIA, *,
-                       max_depth=DEFAULT_SCAN_DEPTH, cancel=None, cache=None):
+                       max_depth=DEFAULT_SCAN_DEPTH, max_folders=None,
+                       cancel=None, cache=None, progress=None):
     """從指定節點往下遞迴，收集「含有目標類型檔案的資料夾」。
 
     ★ 這是取代舊版 100APPLE ~ 105APPLE 序號展開的功能。
       iOS 改版曾把結構從 DCIM\\100APPLE 改成 DCIM\\202510_a 再改成直接放在
       Internal Storage 底下 —— 遞迴掃描對這三種都有效，不必跟著改 code。
 
-    ★ 判斷「有沒有照片」用 folder_has_media()，找到第一個就早退，絕不數完；
-      否則這個功能會變成掃描整支手機。
-    ★ 一律在背景執行緒跑，並提供 cancel。
+    ★★ 這是**慢**操作，不能當成預設動作。
+      實測（2026-08-27）：MTP 每次列舉有 ~45ms 固定開銷，而一支有 50~100 個
+      資料夾的 iPhone 光是展開 Internal Storage 就要 2.7 秒。
+      每個資料夾要 folder_has_media（列檔案）+ list_subfolders（列資料夾）
+      兩次列舉，總量很容易爆掉 —— 初版沒有進度回報也沒有上限，實測跑了
+      20 分鐘沒有任何反應。
+
+    所以這支函式現在強制要求呼叫端提供進度與取消的能力：
+      progress(visited, found, current_name)  每處理完一個資料夾呼叫一次
+      cancel() -> bool                        回 True 就中止
+      max_folders                             走訪上限，超過就停（測試/保險用）
+
+    ★ 先列檔案再列資料夾是刻意的：folder_has_media() 找到第一個符合的就早退，
+      對「裡面全是照片」的資料夾只需要讀到第一筆。
     """
     root_pidl = root.abs_pidl if isinstance(root, (Device, FileEntry)) else root
     found: List[FileEntry] = []
     visited = 0
+    stopped_early = False
 
     def check_cancel():
         if cancel is not None and cancel():
             raise OperationCancelled("使用者取消掃描")
 
     def walk(abs_pidl, depth):
-        nonlocal visited
+        nonlocal visited, stopped_early
+        if stopped_early:
+            return
         check_cancel()
+        if max_folders is not None and visited >= max_folders:
+            stopped_early = True
+            log.warning("達到 max_folders=%d 上限，掃描提前結束", max_folders)
+            return
+
         visited += 1
+        try:
+            name = shell_ns.display_name(abs_pidl)
+        except Exception:   # noqa: BLE001
+            name = "?"
 
         if folder_has_media(abs_pidl, categories):
-            try:
-                name = shell_ns.display_name(abs_pidl)
-            except Exception:   # noqa: BLE001
-                name = "?"
             found.append(FileEntry(name=name, is_dir=True, abs_pidl=abs_pidl))
             log.debug("找到照片資料夾：%s", name)
+
+        if progress is not None:
+            progress(visited, len(found), name)
 
         if depth >= max_depth:
             return
@@ -154,6 +182,6 @@ def find_photo_folders(root, categories=MEDIA, *,
             walk(sub.abs_pidl, depth + 1)
 
     walk(tuple(root_pidl), 0)
-    log.info("掃描完成：走訪 %d 個資料夾，找到 %d 個含有%s的資料夾",
-             visited, len(found), "媒體檔" if categories is MEDIA else "目標檔案")
+    log.info("掃描%s：走訪 %d 個資料夾，找到 %d 個含有媒體檔的資料夾",
+             "中止" if stopped_early else "完成", visited, len(found))
     return found

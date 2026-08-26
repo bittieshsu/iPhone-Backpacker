@@ -2,19 +2,17 @@
 """階段 2 的裝置測試與效能 benchmark。
 
 用法（在 Windows 上）：
-    python tools/smoke_device.py                  # 偵測 + 量測
-    python tools/smoke_device.py --copy D:\\backup # 額外實測複製第一個照片資料夾
+    python tools/smoke_device.py                      # 偵測 + 量測（快，預設不做全裝置掃描）
+    python tools/smoke_device.py --probe-folders 5    # 對前 5 個照片資料夾做早退量測
+    python tools/smoke_device.py --scan               # 額外測 find_photo_folders（慢，有進度與上限）
+    python tools/smoke_device.py --copy D:\\backup     # 額外實測複製第一個照片資料夾
 
-★ 請跑兩次：一次「拔掉 iPhone」、一次「插著 iPhone」。
-  階段 1 量到「列出本機」要 774ms，需要這組對照才知道那是不是
-  Shell 為 MTP 裝置開 WPD session 的 warm-up 成本。
-
-本腳本要回答的問題（見 docs/ai/02-roadmap.md 階段 2）：
-  1. 列出「本機」有插/沒插 iPhone 差多少？
-  2. 展開 iPhone 的資料夾一層要多久？能不能進 0.5 秒？
-  3. SHCONTF_FOLDERS 在 MTP 上有沒有真的省到？（A/B 對照）
-  4. folder_has_media() 的早退相對於完整列舉省了多少？
-  5. 第一次觸碰裝置的 warm-up 成本是多少？
+★ v2 修正了 v1 的兩個缺陷：
+  1. 列舉旗標 A/B 對照原本跑在葉節點（只有 2 個項目），量到的全是固定開銷，
+     結論無效。現在改成自動挑「子資料夾最多」的那一層來測 —— 對 iPhone
+     就是 Internal Storage。
+  2. find_photo_folders 原本沒有進度也沒有上限，在 50~100 個資料夾的裝置上
+     跑 20 分鐘沒有任何反應。現在改為選配、有進度、有上限。
 """
 
 import argparse
@@ -40,21 +38,24 @@ def timed(label, fn, target=None):
     ms = (time.perf_counter() - start) * 1000
     mark = ""
     if target is not None:
-        mark = "  <= 目標 {:.0f}ms" .format(target) if ms <= target \
-            else "  ★ 超過目標 {:.0f}ms".format(target)
-    log.info("%-38s %8.1f ms%s", label, ms, mark)
+        mark = ("  <= 目標 {:.0f}ms".format(target) if ms <= target
+                else "  ★ 超過目標 {:.0f}ms".format(target))
+    log.info("%-40s %9.1f ms%s", label[:40], ms, mark)
     return result, ms
 
 
-def bench_enum_flags(abs_pidl, name):
-    """A/B 對照：只列資料夾 vs 全部列。
+def bench_enum_flags(abs_pidl, label):
+    """A/B 對照：只列資料夾 vs 全部列 vs 只列檔案。
 
-    這是整個效能契約最關鍵的未知數 ——
-    如果 MTP 的 shell extension 內部仍然走訪全部項目再過濾，
-    那 SHCONTF_FOLDERS 就省不到，我們得改用骨架畫面 + 非同步預取。
+    ★ 這是整個效能契約最關鍵的未知數。
+      如果 MTP 的 shell extension 內部仍然走訪全部項目再過濾，
+      SHCONTF_FOLDERS 就省不到，我們得改用骨架畫面 + 非同步預取。
+
+    ★ 一定要跑在「項目夠多」的節點上，否則量到的全是 ~45ms 的固定開銷，
+      比例毫無意義（v1 就是栽在這裡）。
     """
     log.info("")
-    log.info("--- 列舉旗標 A/B 對照：%s ---", name)
+    log.info("--- 4. 列舉旗標 A/B 對照：[%s] ---", label)
 
     folders, ms_folders = timed(
         "SHCONTF_FOLDERS（只要資料夾）",
@@ -64,37 +65,72 @@ def bench_enum_flags(abs_pidl, name):
         "FOLDERS|NONFOLDERS（全部）",
         lambda: list(shell_ns.iter_entries(abs_pidl, flags=shell_ns.EVERYTHING)),
     )
-    files_only, ms_files = timed(
+    files, ms_files = timed(
         "SHCONTF_NONFOLDERS（只要檔案）",
         lambda: list(shell_ns.iter_entries(abs_pidl, flags=shell_ns.FILES_ONLY)),
     )
 
-    log.info("資料夾 %d 個 / 全部 %d 項 / 檔案 %d 個",
-             len(folders), len(everything), len(files_only))
-    if ms_all > 0:
-        ratio = ms_folders / ms_all
-        log.info("結論：只列資料夾花了全部列舉的 %.0f%% 的時間", ratio * 100)
-        if ratio > 0.7 and len(everything) > len(folders) * 3:
-            log.warning("★ SHCONTF_FOLDERS 幾乎沒省到 —— "
-                        "MTP shell extension 很可能內部仍走訪全部項目。")
-            log.warning("  → 需要啟用備案：骨架畫面 + 非同步預取（見效能契約）")
-        else:
-            log.info("★ SHCONTF_FOLDERS 有效，效能契約的前提成立。")
-    return files_only
+    log.info("項目數：資料夾 %d / 全部 %d / 檔案 %d",
+             len(folders), len(everything), len(files))
+
+    if len(everything) < 20:
+        log.warning("★ 這個節點只有 %d 個項目，量到的主要是固定開銷，"
+                    "比例不具參考價值。", len(everything))
+        return
+
+    ratio = ms_folders / ms_all if ms_all else 1.0
+    log.info("結論：只列資料夾花了全部列舉的 %.0f%% 的時間", ratio * 100)
+    if len(files) > len(folders) * 2 and ratio > 0.7:
+        log.warning("★ SHCONTF_FOLDERS 沒省到 —— MTP shell extension 內部"
+                    "很可能仍走訪全部項目。")
+        log.warning("  → 效能契約的前提不成立，需要備案："
+                    "骨架畫面 + 非同步預取 + 跨 session 的磁碟快取")
+    else:
+        log.info("★ SHCONTF_FOLDERS 有效，效能契約的前提成立。")
+
+
+def walk_levels(dev, cache, max_depth):
+    """一層一層往下展開，記錄每層的節點與子資料夾數。
+
+    回傳 [(label, abs_pidl, subfolder_count), ...]
+    """
+    levels = []
+    node = dev.abs_pidl
+    labels = [dev.name]
+
+    for _ in range(max_depth + 1):
+        label = " / ".join(labels)
+        subs, _ = timed("展開 [{}]".format(label[-36:]),
+                        lambda n=node: listing.list_subfolders(n, cache),
+                        TARGET_MS)
+        levels.append((label, node, subs))
+        if not subs:
+            break
+        node = subs[0].abs_pidl
+        labels.append(subs[0].name)
+
+    return levels
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--copy", metavar="DEST",
                         help="額外實測：把找到的第一個照片資料夾複製到 DEST")
-    parser.add_argument("--depth", type=int, default=device.DEFAULT_SCAN_DEPTH,
-                        help="自動尋找照片資料夾的遞迴深度（預設 %(default)s）")
+    parser.add_argument("--depth", type=int, default=3,
+                        help="逐層展開的層數（預設 %(default)s）")
+    parser.add_argument("--probe-folders", type=int, default=3, metavar="N",
+                        help="對前 N 個照片資料夾做早退 vs 完整列舉的對照"
+                             "（預設 %(default)s，設 0 跳過）")
+    parser.add_argument("--scan", action="store_true",
+                        help="額外測 find_photo_folders（慢）")
+    parser.add_argument("--max-folders", type=int, default=20, metavar="N",
+                        help="--scan 的走訪上限（預設 %(default)s）")
     args = parser.parse_args()
 
     setup_logging(level=logging.INFO)
 
     with shell_ns.com_apartment():
-        # ---- 1. 「本機」列舉（有插/沒插 iPhone 的對照組） ----
+        # ---- 1. 「本機」列舉 ----
         log.info("=== 1. 「本機」列舉 ===")
         this_pc, _ = timed("this_pc_pidl()", shell_ns.this_pc_pidl)
         nodes, ms_cold = timed("列出「本機」（首次 / 冷）",
@@ -110,14 +146,12 @@ def main():
         devices, _ = timed("find_portable_devices()", device.find_portable_devices)
         if not devices:
             log.info("沒有偵測到可攜式裝置。")
-            log.info("★ 這一輪就是「沒插 iPhone」的對照組，"
-                     "請記下上面「列出本機（冷）」的 %.1f ms。", ms_cold)
-            log.info("   接著插上 iPhone 再跑一次，比較兩個數字。")
+            log.info("★ 這一輪是「沒插 iPhone」的對照組，"
+                     "請記下「列出本機（冷）」的 %.1f ms。", ms_cold)
             return 0
 
         dev = devices[0]
         log.info("裝置：%s", dev.name)
-        log.info("解析名稱：%s", dev.parsing_name)
         status, _ = timed("probe()", lambda: device.probe(dev))
         log.info("狀態：%s", status.name)
         log.info("訊息：%s", device.status_message(status, dev.name).replace("\n", " / "))
@@ -128,64 +162,74 @@ def main():
 
         # ---- 3. 逐層展開 ----
         log.info("")
-        log.info("=== 3. 逐層展開（互動路徑，每一層都要 < %.0f ms） ===", TARGET_MS)
+        log.info("=== 3. 逐層展開（互動路徑，每層都要 < %.0f ms） ===", TARGET_MS)
         cache = listing.NamespaceCache()
-        node = dev.abs_pidl
-        path_labels = [dev.name]
-        deepest_with_files = None
+        levels = walk_levels(dev, cache, args.depth)
+        deepest_label, deepest_node, _ = levels[-1]
+        timed("最深一層再展開一次（快取命中）",
+              lambda: listing.list_subfolders(deepest_node, cache), TARGET_MS)
 
-        for depth in range(args.depth + 1):
-            label = " / ".join(path_labels)
-            subs, _ = timed("展開 [{}]".format(label[-34:]),
-                            lambda n=node: listing.list_subfolders(n, cache),
-                            TARGET_MS)
-            if not subs:
-                deepest_with_files = node
-                break
-            node = subs[0].abs_pidl
-            path_labels.append(subs[0].name)
-        else:
-            deepest_with_files = node
-
-        timed("同一層再展開一次（快取命中）",
-              lambda: listing.list_subfolders(node, cache), TARGET_MS)
-
-        # ---- 4. 列舉旗標 A/B ----
-        if deepest_with_files:
-            bench_enum_flags(deepest_with_files, " / ".join(path_labels[-2:]))
-
-            log.info("")
-            log.info("--- 早退 vs 完整列舉 ---")
-            timed("folder_has_media()（早退）",
-                  lambda: listing.folder_has_media(deepest_with_files, MEDIA))
-            files, _ = timed("iter_files()（完整列舉）",
-                             lambda: list(listing.iter_files(deepest_with_files, MEDIA)))
-            log.info("該資料夾符合 %s 的檔案：%d 個", describe(MEDIA), len(files))
-
-        # ---- 5. 自動尋找照片資料夾 ----
+        # ---- 4. A/B：挑「子資料夾最多」的那一層來測 ----
+        # ★ 這正是 v1 選錯的地方。對 iPhone 來說這一層就是 Internal Storage。
+        richest = max(levels, key=lambda lv: len(lv[2]))
         log.info("")
-        log.info("=== 5. 自動尋找照片資料夾（背景任務，允許慢） ===")
-        folders, _ = timed(
-            "find_photo_folders(depth={})".format(args.depth),
-            lambda: device.find_photo_folders(dev, MEDIA, max_depth=args.depth,
-                                              cache=cache),
-        )
-        for entry in folders:
-            log.info("    %s", entry.name)
+        log.info("子資料夾最多的一層是 [%s]：%d 個",
+                 richest[0], len(richest[2]))
+        bench_enum_flags(richest[1], richest[0])
 
-        # ---- 6. 選配：實際複製 ----
+        # ---- 5. 早退 vs 完整列舉（要跑在真的裝了很多照片的資料夾上） ----
+        candidates = richest[2][: args.probe_folders]
+        if candidates:
+            log.info("")
+            log.info("--- 5. 早退 vs 完整列舉（前 %d 個資料夾） ---", len(candidates))
+            for entry in candidates:
+                _, ms_probe = timed("  early-exit [{}]".format(entry.name[:24]),
+                                    lambda e=entry: listing.folder_has_media(
+                                        e.abs_pidl, MEDIA))
+                files, ms_full = timed("  full       [{}]".format(entry.name[:24]),
+                                       lambda e=entry: list(listing.iter_files(
+                                           e.abs_pidl, MEDIA)))
+                saved = (1 - ms_probe / ms_full) * 100 if ms_full else 0
+                log.info("  → %d 個檔案，早退省下 %.0f%%", len(files), saved)
+
+        # ---- 6. 選配：全裝置掃描 ----
+        if args.scan:
+            log.info("")
+            log.info("=== 6. find_photo_folders（慢，上限 %d 個資料夾） ===",
+                     args.max_folders)
+            start = time.perf_counter()
+
+            def on_progress(visited, found, name):
+                elapsed = time.perf_counter() - start
+                log.info("  [%3d 已走訪 / %2d 命中 / %5.1fs] %s",
+                         visited, found, elapsed, name[:40])
+
+            folders, _ = timed(
+                "find_photo_folders()",
+                lambda: device.find_photo_folders(
+                    dev, MEDIA, max_depth=2,
+                    max_folders=args.max_folders, progress=on_progress,
+                    cache=cache),
+            )
+            for entry in folders:
+                log.info("    命中：%s", entry.name)
+        else:
+            folders = richest[2]
+            log.info("")
+            log.info("（略過 find_photo_folders，需要時加 --scan）")
+
+        # ---- 7. 選配：實際複製 ----
         if args.copy and folders:
             log.info("")
-            log.info("=== 6. 實際複製第一個資料夾 ===")
+            log.info("=== 7. 實際複製 [%s] ===", folders[0].name)
             plan = copier.plan_copy([folders[0]], args.copy)
-            report, _ = timed("run_copy",
-                              lambda: copier.run_copy(plan, MEDIA))
+            report, _ = timed("run_copy", lambda: copier.run_copy(plan, MEDIA))
             log.info("結果：%s", report.summary())
             for name in report.failed[:20]:
                 log.warning("  失敗：%s", name)
 
         log.info("")
-        log.info("★ 請把整段輸出貼回來，這些數字會寫進 docs/ai/04-shell-com-notes.md")
+        log.info("★ 請把整段輸出貼回來，數字會寫進 docs/ai/04-shell-com-notes.md")
         return 0
 
 
