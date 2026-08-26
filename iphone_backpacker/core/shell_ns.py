@@ -159,6 +159,18 @@ def _enum_pidls(folder, flags):
             yield rel_pidl
 
 
+def iter_child_pidls(abs_pidl, flags=EVERYTHING):
+    """只列舉子項的絕對 PIDL，不取顯示名稱。
+
+    給效能量測與「只需要數量/位置、不需要名字」的場合用。
+    GetDisplayNameOf 在 MTP 上是每個項目一次來回，佔比可能不小，
+    所以把「有沒有取名字」拆成兩支函式才量得出來。
+    """
+    folder = bind_folder(abs_pidl)
+    for rel_pidl in _enum_pidls(folder, flags):
+        yield combine(abs_pidl, rel_pidl)
+
+
 def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False):
     """列舉一層，yield (child_abs_pidl, name, attributes)。
 

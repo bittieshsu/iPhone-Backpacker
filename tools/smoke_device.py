@@ -79,14 +79,30 @@ def bench_enum_flags(abs_pidl, label):
         return
 
     ratio = ms_folders / ms_all if ms_all else 1.0
-    log.info("結論：只列資料夾花了全部列舉的 %.0f%% 的時間", ratio * 100)
-    if len(files) > len(folders) * 2 and ratio > 0.7:
-        log.warning("★ SHCONTF_FOLDERS 沒省到 —— MTP shell extension 內部"
-                    "很可能仍走訪全部項目。")
-        log.warning("  → 效能契約的前提不成立，需要備案："
-                    "骨架畫面 + 非同步預取 + 跨 session 的磁碟快取")
+    log.info("只列資料夾花了全部列舉的 %.0f%% 的時間", ratio * 100)
+
+    # ★ 判定邏輯 v3。
+    # v1 錯在跑於 2 個項目的葉節點；v2 錯在「檔案數 0」時直接掉進 else
+    # 印出「有效」。真正有意義的訊號是：要求一個回傳 0 項的旗標，
+    # 如果仍然花掉跟完整列舉相當的時間，就證明旗標只是事後過濾。
+    if n_zero_flag_cost(len(files), ms_files, len(folders), ms_folders):
+        log.warning("★ 要求「只列檔案」回傳 0 項，卻仍花了 %.0f ms"
+                    "（列 %d 個資料夾是 %.0f ms）", ms_files, len(folders), ms_folders)
+        log.warning("  → 旗標是**事後過濾**，不會減少 Shell 的實際工作量。")
+        log.warning("  → 效能契約的「只列資料夾比較快」前提**不成立**，"
+                    "需要備案：非同步展開 + 骨架畫面 + 跨 session 磁碟快取")
+    elif len(files) < 20:
+        log.warning("★ 這個節點只有 %d 個檔案，旗標無從區分，不下結論。"
+                    "請改用 tools/bench_enum.py 做成本模型量測。", len(files))
+    elif ratio > 0.7:
+        log.warning("★ SHCONTF_FOLDERS 沒省到 —— 內部很可能仍走訪全部項目。")
     else:
-        log.info("★ SHCONTF_FOLDERS 有效，效能契約的前提成立。")
+        log.info("★ SHCONTF_FOLDERS 有效（省下 %.0f%%）。", (1 - ratio) * 100)
+
+
+def n_zero_flag_cost(n_files, ms_files, n_folders, ms_folders):
+    """「回傳 0 項的旗標卻仍花了可觀時間」—— 旗標是事後過濾的直接證據。"""
+    return n_files == 0 and n_folders > 20 and ms_files > ms_folders * 0.5
 
 
 def walk_levels(dev, cache, max_depth):

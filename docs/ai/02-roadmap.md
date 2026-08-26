@@ -55,17 +55,29 @@
 - [x] `status_message()` 產生使用者看得懂的提示（「請解鎖並點信任」）
 - [x] `find_photo_folders()` 遞迴掃描，用 `folder_has_media()` 早退、可取消
 - [x] `tools/smoke_device.py` benchmark 腳本
-- [ ] **⚠ 待使用者實測**：`python tools/smoke_device.py`
-      **要跑兩次 —— 一次拔掉 iPhone、一次插著**，才有對照組
-- [ ] 把量到的數字寫回 `04-shell-com-notes.md`
+- [x] `tools/smoke_device.py` 已在真機跑過兩輪（拔掉 / 插著），數字寫進
+      `04-shell-com-notes.md`，並產生決策 D10 / D11
+- [ ] **⚠ 待實測**：`python tools/bench_enum.py --list` 挑一個照片多的資料夾，
+      再 `python tools/bench_enum.py --folder <名稱>` ——
+      **這是唯一還沒回答的問題**（見下）
+- [ ] `probe()` 的 LOCKED_OR_UNTRUSTED 分支還沒驗過
+      （鎖著螢幕插上去，應該要提示「請解鎖並點信任」而不是回 OK）
 
-### benchmark 要回答的問題
+### benchmark 已回答的問題
 
-1. 列出「本機」有插/沒插 iPhone 差多少？（階段 1 量到 774ms，需要對照組）
-2. 展開 iPhone 資料夾一層要多久？進得了 0.5 秒嗎？
-3. **`SHCONTF_FOLDERS` 在 MTP 上有沒有真的省到？** ← 最關鍵的未知數，腳本有 A/B 對照
-4. `folder_has_media()` 早退相對完整列舉省了多少？
-5. 第一次觸碰裝置的 warm-up 成本是多少？
+1. ✅ 列出「本機」有插/沒插差多少 → **沒差**（772.7 vs 768.5 ms），跟 iPhone 無關
+2. ✅ 展開 `Internal Storage`（184 項）要 1.5~2.5 秒，**進不了 0.5 秒**
+3. ✅ **`SHCONTF_FOLDERS` 是事後過濾，不會減少工作量** → 決策 D10
+4. ✅ 成本模型 ≈ `40 ms + 8.2 ms × 項目數` → 決策 D11
+5. ✅ 裝置偵測總成本約 1.9 秒 → 啟動必須非同步
+
+### ★ 還沒回答的一題
+
+**MTP 的 enumerator 是不是串流？**（第一次 `Next()` 是逐筆回傳，還是先把整份清單備妥）
+
+這決定 `folder_has_media()` 的早退有沒有意義。前一輪量到的三個資料夾各只有
+1~3 個檔案，且有冷熱順序偏差，**無法回答**。
+`tools/bench_enum.py` 專門測這件事，所有量測都先 warm-up。
 
 **驗證方式**：插拔 iPhone、鎖定/解鎖、點/不點「信任」，三種狀態都要正確回報。
 **效能不達標就先解決效能再往下**，這是專案存在的理由（見 D8）。
