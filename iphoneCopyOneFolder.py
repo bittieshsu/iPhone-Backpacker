@@ -8,10 +8,22 @@ import os, argparse
 from tqdm import tqdm
 from typing import List
 
-FILTER=["jpg", "JPG", "Jpg",
-        "jpeg", "JPEG", "Jpeg",
-        "png", "PNG", "Png",
-        "bmp", "BMP", "Bmp"]
+# 副檔名一律以小寫比對，見 getExtension()。
+# iPhone「保留原始檔」模式直出 .heic/.heif/.mov；
+# 「自動」模式由手機端即時轉檔為 .jpg/.mov。
+IMAGE_EXTS = {
+    "jpg", "jpeg", "jpe", "png", "bmp", "gif", "tif", "tiff",
+    "heic", "heif", "dng", "webp",
+}
+VIDEO_EXTS = {"mov", "mp4", "m4v", "avi", "3gp", "mpg", "mpeg"}
+SIDECAR_EXTS = {"aae"}  # iPhone 的編輯紀錄，非影像本體
+
+FILTER = IMAGE_EXTS  # 沿用舊名稱，供既有呼叫端使用
+
+
+def getExtension(fileName):
+    """回傳不含點、已轉小寫的副檔名；沒有副檔名時回傳空字串。"""
+    return os.path.splitext(fileName)[1].lstrip(".").lower()
 
 
 def getItemsInside(parentFolderObject, filtering=False):
@@ -20,7 +32,7 @@ def getItemsInside(parentFolderObject, filtering=False):
         fileName = parentFolderObject.GetDisplayNameOf(pidl, shellcon.SHGDN_NORMAL)
         if not filtering: nameList.append(fileName)
         else:
-            extName = fileName.split(".")[-1]
+            extName = getExtension(fileName)
             if extName in FILTER: nameList.append(fileName)
     return nameList
 
@@ -28,7 +40,7 @@ def getFilteringSignals(parentFolderObject):
     filteringSignals = []
     for pidl in parentFolderObject:
         fileName = parentFolderObject.GetDisplayNameOf(pidl, shellcon.SHGDN_NORMAL)
-        extName = fileName.split(".")[-1]
+        extName = getExtension(fileName)
         filteringSignals.append(True if extName in FILTER else False)
     return filteringSignals
 
@@ -61,8 +73,9 @@ def getFolderObject(folderName, parentFolderObject=None, isWholeName=True, chara
                 pidl_get = pidl
                 break
     if pidl_get is None:
-        print("Error: Cannot find \"{}\" in parentFolder".format(folderName))
-        print(getItemsInside(parentFolderObject))
+        raise FileNotFoundError(
+            "找不到「{}」。父資料夾內容為：{}".format(
+                folderName, getItemsInside(parentFolderObject)))
     folder = parentFolderObject.BindToObject(pidl_get, None, shell.IID_IShellFolder)
     return folder, pidl_get
 
@@ -143,6 +156,13 @@ def copyShellItem_batch(srcFolderObject, dstFolderObject, itemPIDL_list:List, ds
     else:
         for pidl in itemPIDL_list:
             src_list.append(shell.SHCreateShellItem(src_idl, None, pidl)) #Create a ShellItem of the source file
+
+    # PerformOperations() 在零排程時會回 0x8000FFFF (E_UNEXPECTED)，
+    # 也就是 -2147418113「災難性的失敗」。必須先擋下來。
+    if not src_list:
+        print("There are 0 files to be copied. [{}]. Skipped.".format(
+            "Filtered" if filtering else "Not filtered, Copy All."))
+        return
 
     dst = shell.SHCreateItemFromIDList(dst_idl)
 
