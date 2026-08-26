@@ -38,9 +38,16 @@
 
 - [ ] `device.py`：`find_portable_devices()` 用 `CSIDL_DRIVES` + `SHGDN_FORPARSING`，語言中立
 - [ ] `probe()` 判斷 OK / NOT_FOUND / LOCKED_OR_UNTRUSTED
-- [ ] `find_photo_folders()` 遞迴掃描（限深度 3）
+- [ ] `find_photo_folders()` 遞迴掃描（限深度 3，用 `folder_has_media()` 早退）
+- [ ] **★ 效能 benchmark（先做，別用猜的）** —— 在真實 iPhone 上量測並記錄到
+      `04-shell-com-notes.md`：
+  - `list_subfolders()` 展開 DCIM 一層要多久？（目標 < 0.5s）
+  - `SHCONTF_FOLDERS` 有沒有真的省到？跟不帶該旗標比較
+  - 第一次觸碰裝置的 warm-up 成本是多少？
+  - 含 5000 張照片的資料夾 `iter_files()` 完整列舉要多久？
 
 **驗證方式**：插拔 iPhone、鎖定/解鎖、點/不點「信任」，三種狀態都要正確回報。
+**效能不達標就先解決效能再往下**，這是專案存在的理由（見 D8）。
 
 ---
 
@@ -48,6 +55,8 @@
 
 - [ ] PySide6 主視窗，`QTreeWidget` 樹狀 + checkbox（**資料夾層級**）
 - [ ] 目的地選擇、全選/全不選
+- [ ] `NamespaceCache`：展開過的節點收合再展開是零成本
+- [ ] 右側摘要面板 —— **檔案數/大小背景算，不阻塞勾選與備份**（見 D8）
 - [ ] **先只接本機資料夾**，把互動流程跑順再接 iPhone
 
 **驗證方式**：介面流程確認，使用者實際點過一輪。
@@ -65,6 +74,7 @@
 
 ## 階段 5 — 可靠度 ⬜ 未開始
 
+- [ ] streaming pipeline：`iter_files → 過濾 → 去重 → 每 200 檔排程一次`（不要先讀成大 list）
 - [ ] 分批複製（chunk 200）+ 真實進度
 - [ ] `FOF_NOERRORUI` 關掉「是否略過」小視窗 + 驗證掃描產生失敗清單
 - [ ] 失敗清單 UI + 「重試失敗項目」按鈕

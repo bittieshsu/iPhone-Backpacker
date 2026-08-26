@@ -81,6 +81,28 @@ shell.SHCreateItemFromParsingName(str(dest_path), None, shell.IID_IShellItem)
 
 ---
 
+## 效能：檔案總管為什麼慢 ★
+
+在 MTP 上，慢的主因**不是列舉本身**，是這兩件事：
+
+| 昂貴的操作 | 成本 |
+|---|---|
+| **縮圖（thumbnail）** | 每張照片都要把影像資料抓下來解碼。最大宗。 |
+| **`GetDetailsOf` 取大小/日期** | **每個項目一次來回**。幾千個項目就是幾千次來回。 |
+
+**本專案兩件都不做**（使用者明確表示不需要縮圖），這是我們能比檔案總管快的根本原因。
+
+實作規則：
+- 樹狀展開用 `SHCONTF_FOLDERS`，只要資料夾
+- `list_children(..., want_details=False)` 是預設，`GetDetailsOf` 只在真的要用時呼叫
+- 列舉結果進 session 快取，收合再展開零成本
+- 「這個資料夾有沒有照片」用早退判斷，找到第一個就 return，不要數完
+
+**待量測（階段 2）**：`SHCONTF_FOLDERS` 在 iPhone 的 MTP shell extension 上
+是否真的只走訪資料夾、還是內部仍列舉全部再過濾。量測結果請寫回這裡。
+
+---
+
 ## MTP / iPhone 的行為特性
 
 - **未解鎖或未點「信任這部電腦」時，資料夾會列舉成「空的」而不是報錯。**

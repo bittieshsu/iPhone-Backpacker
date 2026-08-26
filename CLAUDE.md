@@ -42,6 +42,11 @@ iPhone 接上 Windows 走 **PTP/MTP**，在檔案總管看得到但**沒有磁�
 - `core/` 底下**零 Qt import、零 print**。UI 只能單向依賴 core。
 - COM 介面（`IShellFolder` / `IShellItem`）**不能跨執行緒傳遞**；PIDL 是純資料，可以。
   worker thread 開頭 `pythoncom.CoInitialize()`、結尾 `CoUninitialize()`。
+- **★ 瀏覽路徑上絕對不碰檔案。** 樹狀展開只列舉資料夾（`SHCONTF_FOLDERS`），
+  不取縮圖、不呼叫 `GetDetailsOf`。任何需要列舉檔案才算得出來的資訊，
+  一律背景非同步且不阻塞使用者操作。
+  **本專案存在的理由就是「檔案總管太慢」，違反這條等於做白工。**
+  詳見 `docs/ai/01-architecture.md` 的「效能契約」與 `03-decisions.md` 的 D8。
 
 ## 使用者情境備註
 
