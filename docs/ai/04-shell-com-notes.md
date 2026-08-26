@@ -98,8 +98,49 @@ shell.SHCreateItemFromParsingName(str(dest_path), None, shell.IID_IShellItem)
 - 列舉結果進 session 快取，收合再展開零成本
 - 「這個資料夾有沒有照片」用早退判斷，找到第一個就 return，不要數完
 
-**待量測（階段 2）**：`SHCONTF_FOLDERS` 在 iPhone 的 MTP shell extension 上
-是否真的只走訪資料夾、還是內部仍列舉全部再過濾。量測結果請寫回這裡。
+### 實測數據
+
+**2026-08-27，階段 1 煙霧測試（本機資料夾，Windows + Python 3.12，插著 iPhone）**
+
+| 操作 | 耗時 | 備註 |
+|---|---|---|
+| `this_pc_pidl()` | 7.1 ms | CSIDL_DRIVES，可忽略 |
+| **列出「本機」底下 8 個節點** | **774.5 ms** | **★ 超過 0.5s 目標，見下方** |
+| `list_subfolders()` 本機小資料夾（首次） | 6.5 ms | |
+| `list_subfolders()` 同節點（快取命中） | < 0.1 ms | 快取有效 |
+| `folder_has_media()` 早退 | 2.6 ms | |
+| `iter_files()` 完整列舉（4 個檔案） | 2.1 ms | |
+| `run_copy()` 複製 4 個檔案 | 598.6 ms | **固定成本，不是每檔成本** |
+| `run_copy()` 重跑（全部命中增量去重） | 15.4 ms | 去重有效 |
+
+驗證通過的假設：
+- `IEnumIDList.Next(64)` 批次列舉可用，沒有觸發單筆 fallback。
+- 「本機」底下同時列出磁碟機（`OS (C:)`）、使用者資料夾（`下載`/`圖片`/`桌面`…）
+  與 `Apple iPhone`，證實 `SFGAO_FOLDER && !SFGAO_FILESYSTEM` 這個判斷有東西可分。
+
+### ★ 待釐清：「本機」列舉的 774 ms
+
+量測當下**插著 iPhone**。高度懷疑這 774 ms 主要是 Shell 為了 MTP 裝置
+開啟 WPD session 的 warm-up 成本，而不是列舉本身。
+
+**階段 2 必須做「有插 / 沒插」兩組對照**（`tools/smoke_device.py` 已內建這個量測）。
+
+若確認是裝置 warm-up：這是**一次性**成本，設計上的正解是
+**UI 啟動時不要同步等它** —— 先畫出視窗與「正在偵測裝置…」狀態，
+偵測在背景執行緒跑完再填樹。使用者感受到的是「立刻開啟」而不是「卡 0.8 秒」。
+
+### 另一個實測發現：`IFileOperation` 有固定啟動成本
+
+複製 4 個檔案花了 598 ms。這幾乎全是建立 `IFileOperation` +
+`PerformOperations()` 的固定開銷，不是每檔成本。
+
+**設計含意**：chunk 不能切太小，否則固定成本會被乘上批次數。
+`chunk_size=200` 的預設值是合理的，不要為了進度更新頻繁而調小。
+
+### 待量測（階段 2）
+
+`SHCONTF_FOLDERS` 在 iPhone 的 MTP shell extension 上
+是否真的只走訪資料夾、還是內部仍列舉全部再過濾。`tools/smoke_device.py` 會做 A/B 對照。
 
 ---
 

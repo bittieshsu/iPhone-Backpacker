@@ -56,7 +56,17 @@ def main():
             log.info("    %s", entry.name)
 
         # 2. 來源資料夾
-        source_path = Path(args.source).resolve()
+        source_path = Path(args.source)
+        if not source_path.is_dir():
+            log.error("「%s」不是本機上的資料夾。", args.source)
+            log.error("")
+            log.error("★ 如果你剛剛貼的是 iPhone 裡的資料夾路徑，那是預期會失敗的：")
+            log.error("  iPhone 走 MTP，在 Windows 上沒有真實檔案系統路徑，")
+            log.error("  Path().resolve() 只會把它接到目前目錄後面變成一個不存在的路徑。")
+            log.error("  這正是舊版用字串指定資料夾的作法被 iOS 改版打爆的原因。")
+            log.error("  要測 iPhone 請用：python tools/smoke_device.py")
+            return 2
+        source_path = source_path.resolve()
         source_pidl = shell_ns.pidl_from_path(source_path)
         source = FileEntry(name=source_path.name, is_dir=True, abs_pidl=source_pidl)
 
@@ -65,7 +75,10 @@ def main():
                         lambda: listing.list_subfolders(source_pidl, cache))
         _, warm = timed("list_subfolders（快取）",
                         lambda: listing.list_subfolders(source_pidl, cache))
-        log.info("快取加速：%.0fx", (cold / warm) if warm else 0)
+        # 快取命中通常快到量不出來，直接報「命中」比報一個沒有意義的倍率誠實。
+        log.info("快取：%.1f ms → %s", cold * 1000,
+                 "命中（低於計時器解析度）" if warm * 1000 < 0.1
+                 else "{:.1f} ms".format(warm * 1000))
 
         has_media, _ = timed("folder_has_media（早退）",
                              lambda: listing.folder_has_media(source_pidl, categories))
