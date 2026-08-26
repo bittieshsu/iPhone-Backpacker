@@ -63,18 +63,26 @@ def bench_scaling(abs_pidl, name, total_hint=None):
     log.info("")
     log.info("=== Q2 串流測試：[%s] ===", name)
 
+    # 只在最開頭 warm-up 一次（第一次觸碰要開該資料夾的 MTP 物件）。
+    # 之後每一步都已經是熱的，不需要各自再 warm-up 一遍 ——
+    # 那會讓整個量測時間加倍。
+    log.info("（warm-up 中…）")
+    consume(abs_pidl, shell_ns.EVERYTHING, limit=1)
+
     steps = [1, 10, 50, 200, 800]
     points = []
     for n in steps:
         got, ms = measure("取前 {:>4} 筆".format(n),
-                          lambda k=n: consume(abs_pidl, shell_ns.EVERYTHING, limit=k))
+                          lambda k=n: consume(abs_pidl, shell_ns.EVERYTHING, limit=k),
+                          warmup=False)
         points.append((got, ms))
         if got < n:
             log.info("   （這個資料夾只有 %d 項，後面的級距略過）", got)
             break
 
     total, ms_total = measure("取全部",
-                              lambda: consume(abs_pidl, shell_ns.EVERYTHING))
+                              lambda: consume(abs_pidl, shell_ns.EVERYTHING),
+                              warmup=False)
     points.append((total, ms_total))
 
     log.info("")
