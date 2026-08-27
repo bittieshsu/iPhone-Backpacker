@@ -78,12 +78,13 @@ def main():
 
     import_ms = getattr(sys.modules["__main__"], "_IMPORT_MS", None)
     if import_ms is not None:
-        # 使用者回報首次啟動要 7 秒、第二次 3 秒。實測從 setup_logging 到這裡
-        # 只有約 1.2 秒，其餘全是 Python 直譯器啟動 + PySide6 import ——
-        # 那發生在我們的程式碼之前，開發模式下無法改善。
+        # 實測（2026-08-27）：import 約 2100~2400 ms，之後的初始化只有約 80 ms。
+        # 也就是使用者感受到的啟動時間**幾乎全部**是 Python 直譯器啟動 +
+        # PySide6 import，發生在我們任何程式碼之前，開發模式下無法改善。
         # PyInstaller --onedir 打包後會明顯變快（階段 6）。
-        log.info("啟動耗時：import %.0f ms + 初始化 %.0f ms",
-                 import_ms, (time.perf_counter() - _T0) * 1000)
+        total_ms = (time.perf_counter() - _T0) * 1000
+        log.info("啟動耗時：import %.0f ms + 我們的初始化 %.0f ms（合計 %.0f ms）",
+                 import_ms, max(total_ms - import_ms, 0.0), total_ms)
     log.info("啟動完成，log 檔：%s", log_path)
     return app.exec()
 

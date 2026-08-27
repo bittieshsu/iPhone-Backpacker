@@ -11,6 +11,7 @@
 """
 
 import logging
+import re
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -130,12 +131,23 @@ class MainWindow(QMainWindow):
         self.btn_refresh.clicked.connect(self._on_refresh)
         bar.addWidget(self.btn_refresh)
 
+        # ★ 這兩顆按鈕的作用範圍不是「整棵樹」，而是「目前選取節點的底下」。
+        #   使用者回報「全不選」讓人以為會清掉所有勾選，需要明確說明。
+        _scope_note = ("\n\n作用範圍：目前選取的資料夾**底下**。\n"
+                       "沒有選取任何節點時，才會作用在整棵樹。")
+
         self.btn_check_all = QPushButton("全選")
-        self.btn_check_all.setToolTip("勾選目前節點底下所有已載入的資料夾")
+        self.btn_check_all.setToolTip(
+            "把目前選取資料夾底下、已經載入的子資料夾全部打勾。\n"
+            "例：先點 Internal Storage，再按這顆，就會一次勾選它底下"
+            "所有日期資料夾。" + _scope_note)
         self.btn_check_all.clicked.connect(lambda: self._set_all_checked(True))
         bar.addWidget(self.btn_check_all)
 
         self.btn_uncheck_all = QPushButton("全不選")
+        self.btn_uncheck_all.setToolTip(
+            "把目前選取資料夾底下、已經載入的子資料夾全部取消勾選。\n"
+            "注意：**不會**清掉其他地方已經打的勾。" + _scope_note)
         self.btn_uncheck_all.clicked.connect(lambda: self._set_all_checked(False))
         bar.addWidget(self.btn_uncheck_all)
 
@@ -276,8 +288,10 @@ class MainWindow(QMainWindow):
             count += 1
         self.tree.blockSignals(False)
         self._update_detail()
+        where = "「{}」底下".format(scope.text(0)) if scope is not None else "整棵樹"
         self.statusBar().showMessage(
-            "{} {} 個資料夾".format("已勾選" if checked else "已取消勾選", count), 4000)
+            "{} {} 個資料夾（範圍：{}）".format(
+                "已勾選" if checked else "已取消勾選", count, where), 6000)
 
     def _checked_entries(self):
         return [item.data(0, ENTRY_ROLE) for item in self._iter_items()
@@ -290,7 +304,9 @@ class MainWindow(QMainWindow):
     def on_device_detected(self, status, dev):
         name = dev.name if dev is not None else None
         message = core_device.status_message(status, name)
-        self.banner.setText(message.replace("\n", "<br>"))
+        # core 用 **粗體** 標記重點（core 不能知道 UI 用什麼格式），這裡轉成 HTML。
+        html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", message).replace("\n", "<br>")
+        self.banner.setText(html)
         if status is core_device.DeviceStatus.OK:
             self.banner.setStyleSheet(
                 "padding:8px; background:#e8f5e9; border:1px solid #a5d6a7;")
@@ -355,11 +371,16 @@ class MainWindow(QMainWindow):
         lines = [report.summary()]
         if report.aborted:
             lines.append("")
-            lines.append("備份被取消了，但已經複製完成的檔案會保留，"
-                         "下次再備份時會自動跳過。")
+            lines.append("備份被取消了。已經複製完成的檔案會保留，"
+                         "下次再備份時會自動跳過，所以直接再按一次"
+                         "「開始備份」就能接續。")
+        if report.cancelled:
+            lines.append("")
+            lines.append("「尚未複製」的 {} 個檔案不是失敗 —— "
+                         "它們只是還沒輪到就被取消了。".format(len(report.cancelled)))
         if report.failed:
             lines.append("")
-            lines.append("失敗的檔案（共 {} 個）：".format(len(report.failed)))
+            lines.append("真正失敗的檔案（共 {} 個）：".format(len(report.failed)))
             lines.extend("  " + n for n in report.failed[:50])
             if len(report.failed) > 50:
                 lines.append("  …（其餘請看 log 檔）")
@@ -419,6 +440,20 @@ class MainWindow(QMainWindow):
         if not targets:
             self.statusBar().showMessage("選取的資料夾都已經算過了", 4000)
             return
+
+        # 實測每個資料夾約 0.7 秒（MTP 每次列舉有固定開銷）。
+        # 195 個就要兩分多鐘，先問過再跑，不要讓使用者以為當掉。
+        estimate = len(targets) * 0.7
+        if len(targets) > 30:
+            answer = QMessageBox.question(
+                self, "要計算這麼多嗎？",
+                "選取了 {} 個資料夾，估計需要約 {:.0f} 分 {:.0f} 秒。\n"
+                "計算期間可以隨時按「停止計算」。\n\n要開始嗎？".format(
+                    len(targets), estimate // 60, estimate % 60),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
 
         self.tree.blockSignals(True)
         for item in targets:

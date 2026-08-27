@@ -50,15 +50,34 @@ class Device:
 
 
 def status_message(status, device_name=None):
-    """給 UI 直接顯示的訊息。core 不碰 UI，但這段文字的正確性屬於領域知識。"""
+    """給 UI 直接顯示的訊息。core 不碰 UI，但這段文字的正確性屬於領域知識。
+
+    ★ LOCKED_OR_UNTRUSTED 的措辭很重要。實測的狀態變化是：
+
+      1. 沒插手機          → 「本機」底下沒有 Apple iPhone
+      2. 插入手機          → 出現 Apple iPhone 與 Internal Storage，但裡面是空的
+      3. 不理會 / 點不允許 → 同 2
+      4. **點了允許之後，仍然會維持 1~2 分鐘的空狀態**
+      5. 再過一陣子        → Internal Storage 底下才出現資料夾
+
+      第 4 步是關鍵：使用者已經按了「信任」，畫面卻還是叫他去按「信任」，
+      會讓人以為程式壞了或自己按錯。訊息一定要涵蓋「已經按過了，請再等一下」。
+      這段期間連檔案總管也看不到資料夾，所以不是本程式的問題。
+    """
     if status is DeviceStatus.OK:
         return "已連接：{}".format(device_name or "裝置")
     if status is DeviceStatus.NOT_FOUND:
         return ("沒有偵測到 iPhone。\n"
                 "請用 USB 線連接手機，稍候幾秒後按「重新整理裝置」。")
-    return ("偵測到「{}」，但讀不到裡面的內容。\n"
-            "請解鎖 iPhone，並在手機畫面上點「信任這部電腦」，\n"
-            "然後按「重新整理裝置」。".format(device_name or "裝置"))
+    return ("偵測到「{}」，但還讀不到裡面的內容。可能是下列其中一種情況：\n"
+            "\n"
+            "1. iPhone 還沒解鎖 → 請解鎖手機。\n"
+            "2. 還沒點「信任這部電腦」→ 請看手機畫面並點「信任」。\n"
+            "3. **已經點過「信任」了** → 手機準備資料還需要一到兩分鐘，"
+            "有時候更久。請稍等一下再按「重新整理裝置」。\n"
+            "\n"
+            "（第 3 種情況下，用 Windows 檔案總管進去看也是空的，"
+            "這是正常現象，不是程式出問題。）".format(device_name or "裝置"))
 
 
 def find_portable_devices():

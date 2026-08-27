@@ -95,6 +95,7 @@ class CopyReport:
     copied: List[str] = field(default_factory=list)
     failed: List[str] = field(default_factory=list)
     skipped_existing: List[str] = field(default_factory=list)
+    cancelled: List[str] = field(default_factory=list)
     aborted: bool = False
 
     @property
@@ -102,12 +103,16 @@ class CopyReport:
         return not self.failed and not self.aborted
 
     def summary(self):
-        return "複製 {} 個、跳過 {} 個（已存在）、失敗 {} 個{}".format(
-            len(self.copied),
-            len(self.skipped_existing),
-            len(self.failed),
-            "，使用者中途取消" if self.aborted else "",
-        )
+        parts = ["複製 {} 個".format(len(self.copied))]
+        if self.skipped_existing:
+            parts.append("跳過 {} 個（已存在）".format(len(self.skipped_existing)))
+        if self.failed:
+            parts.append("失敗 {} 個".format(len(self.failed)))
+        if self.cancelled:
+            # ★ 取消時「還沒輪到的檔案」不是失敗，要分開講。
+            #   混在一起會讓使用者看到「失敗 243 個」而以為出大事。
+            parts.append("尚未複製 {} 個（已取消）".format(len(self.cancelled)))
+        return "、".join(parts)
 
 
 def plan_copy(sources, dest_dir):
@@ -297,10 +302,17 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
     for source, dest_sub, pending in jobs:
         landed = _local_index(dest_sub)
         for entry in pending:
+            label = "{}\\{}".format(source.name, entry.name)
             if entry.key in landed:
                 report.copied.append(entry.name)
+            elif aborted:
+                # ★ 使用者取消時，沒落地的檔案多半是「還沒輪到」而不是「失敗」。
+                #   我們無法從 IFileOperation 分辨這兩者，所以一律歸到
+                #   cancelled —— 寧可少報失敗，也不要拿一份幾百筆的假失敗
+                #   清單嚇使用者。這些檔案下次備份會自動重試。
+                report.cancelled.append(label)
             else:
-                report.failed.append("{}\\{}".format(source.name, entry.name))
+                report.failed.append(label)
     state.copied = len(report.copied)
     state.failed = len(report.failed)
     report.aborted = aborted
