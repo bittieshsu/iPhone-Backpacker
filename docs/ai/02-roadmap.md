@@ -57,11 +57,10 @@
 - [x] `tools/smoke_device.py` benchmark 腳本
 - [x] `tools/smoke_device.py` 已在真機跑過兩輪（拔掉 / 插著），數字寫進
       `04-shell-com-notes.md`，並產生決策 D10 / D11
-- [ ] **⚠ 待實測**：`python tools/bench_enum.py --list` 挑一個照片多的資料夾，
-      再 `python tools/bench_enum.py --folder <名稱>` ——
-      **這是唯一還沒回答的問題**（見下）
-- [ ] `probe()` 的 LOCKED_OR_UNTRUSTED 分支還沒驗過
-      （鎖著螢幕插上去，應該要提示「請解鎖並點信任」而不是回 OK）
+- [x] `tools/bench_enum.py` / `tools/bench_batch.py` 已實測，
+      確定 `PROBE_BATCH = 1`、`DEFAULT_BATCH` 不重要
+- [x] `probe()` 的 LOCKED_OR_UNTRUSTED 分支已驗過：鎖著螢幕插上去，
+      26.5 ms 判斷出來並提示「請解鎖 iPhone 並點信任這部電腦」
 
 ### benchmark 已回答的問題
 
@@ -71,13 +70,15 @@
 4. ✅ 成本模型 ≈ `40 ms + 8.2 ms × 項目數` → 決策 D11
 5. ✅ 裝置偵測總成本約 1.9 秒 → 啟動必須非同步
 
-### ★ 還沒回答的一題
+6. ✅ **批次大小才是主要參數**。早退用 batch=1 比 batch=64 快 4 倍；
+   完整列舉則與批次無關（~3.4 ms/項）→ `PROBE_BATCH = 1`
+7. ✅ 絕對數字**跨 session 浮動可達 3 倍**，只相信同一輪內的比例
 
-**MTP 的 enumerator 是不是串流？**（第一次 `Next()` 是逐筆回傳，還是先把整份清單備妥）
+### 由使用者實測經驗產生的修正
 
-這決定 `folder_has_media()` 的早退有沒有意義。前一輪量到的三個資料夾各只有
-1~3 個檔案，且有冷熱順序偏差，**無法回答**。
-`tools/bench_enum.py` 專門測這件事，所有量測都先 warm-up。
+使用者回報：早期用 `copyShellItem()` 逐檔複製「超級慢，而且 Windows
+的原生進度視窗會反覆彈出」。這推翻了 `run_copy()` 原本每 200 檔一批的
+設計 → 決策 D12，改為**一個資料夾一次 `IFileOperation`**。
 
 **驗證方式**：插拔 iPhone、鎖定/解鎖、點/不點「信任」，三種狀態都要正確回報。
 **效能不達標就先解決效能再往下**，這是專案存在的理由（見 D8）。

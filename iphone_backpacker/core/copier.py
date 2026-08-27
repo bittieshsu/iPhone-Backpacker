@@ -5,14 +5,25 @@
   那正是使用者用檔案總管複製整個資料夾時遇到的「不穩定」。
   逐檔排程才換得到失敗清單、重試能力與增量去重。
 
-★ 這是一條 streaming pipeline：
-      iter_files → 分類過濾 → 增量去重 → 每 chunk_size 檔送一次 IFileOperation → 驗證掃描
-  不要先把全部檔案讀成一個大 list 再開始複製，那會產生一段沒有進度的無聲等待。
+★★ 一個來源資料夾 = 一次 IFileOperation（決策 D12）。
+  使用者實測過：用 copyShellItem() 逐檔各開一次操作「超級慢」，
+  而且 **Windows 的原生進度視窗會反覆彈出**。切成小批次是同一個問題的
+  縮小版 —— 每次 PerformOperations() 有約 600 ms 固定開銷，一個 5000 張
+  的資料夾切 200 一批就是 25 次視窗 + 15 秒純浪費。
+
+  所以流程改成兩段：
+    第 1 段 列舉 + 過濾 + 去重 → 這段由我們自己回報進度（「已找到 N 個」）
+    第 2 段 一次把整個資料夾排程進單一 IFileOperation → 原生進度視窗只出現一次
+    第 3 段 驗證掃描 → 失敗清單
+
+  第 2 段不需要我們畫進度：IFileOperation 的原生視窗本來就有
+  逐檔進度、剩餘時間與取消鈕，品質比自己畫的高。
 """
 
 import logging
 import os
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 from typing import Dict, List
 
@@ -34,15 +45,24 @@ log = logging.getLogger(__name__)
 # 而那個視窗的品質比我們自己畫的高。
 _OPERATION_FLAGS = shellcon.FOF_NOCONFIRMATION | shellcon.FOF_NOERRORUI
 
-DEFAULT_CHUNK_SIZE = 200
+# 預設不切批：一個來源資料夾 = 一次 IFileOperation（決策 D12）。
+# 這個常數只保留給診斷用途，正常路徑不該用到。
+DIAGNOSTIC_CHUNK_SIZE = 200
+
+
+class CopyPhase(Enum):
+    LISTING = auto()    # 正在列舉來源檔案（我們自己回報進度）
+    COPYING = auto()    # 交給 IFileOperation，原生進度視窗接手
+    VERIFYING = auto()  # 驗證掃描
 
 
 @dataclass
 class CopyProgress:
     """回報給 UI 的進度快照。"""
 
+    phase: CopyPhase = CopyPhase.LISTING
     current_folder: str = ""
-    scheduled: int = 0          # 已排程的檔案數
+    listed: int = 0             # 列舉階段已找到、待複製的檔案數
     copied: int = 0             # 驗證確認已落地的檔案數
     skipped_existing: int = 0   # 增量備份跳過的
     failed: int = 0
@@ -122,8 +142,12 @@ def _local_index(directory):
     return index
 
 
-def _copy_chunk(entries, dest_item, owner_hwnd):
-    """把一批檔案送進一次 IFileOperation。回傳 (成功排程數, 是否被中途取消)。"""
+def _copy_batch(entries, dest_item, owner_hwnd):
+    """把一整批檔案送進**單一** IFileOperation。
+
+    回傳 (成功排程數, 是否被中途取消)。
+    原生進度視窗在 PerformOperations() 期間出現一次，結束後關閉。
+    """
     if not entries:
         # ★ PerformOperations() 在零排程時會回 0x8000FFFF (E_UNEXPECTED)，
         #   也就是使用者回報的 -2147418113「災難性的失敗」。必須擋在這裡。
@@ -163,8 +187,11 @@ def _copy_chunk(entries, dest_item, owner_hwnd):
 
 
 def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
-             chunk_size=DEFAULT_CHUNK_SIZE, progress=None, cancel=None):
+             chunk_size=None, progress=None, cancel=None):
     """執行複製。**必須在 worker thread 且已進入 COM apartment。**
+
+    chunk_size=None（預設）表示「一個來源資料夾一次操作」，見模組 docstring。
+    只有在需要診斷單一大資料夾時才傳入數字強制切批，正常情況不要用。
 
     progress: 可選的 callable，收一個 CopyProgress。
     cancel:   可選的 callable，回傳 True 表示使用者要求取消。
@@ -183,73 +210,93 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
     log.info("開始備份：%d 個資料夾 → %s（%s）",
              len(plan.sources), plan.dest_dir, describe(categories))
 
-    for source in plan.sources:
-        check_cancel()
-        dest_sub = plan.dest_dir / source.name
-        try:
-            dest_sub.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise DestinationError(
-                "無法建立「{}」：{}".format(dest_sub, exc)
-            ) from exc
-
-        state.current_folder = source.name
-        notify()
-
-        existing = _local_index(dest_sub)
-        dest_item = shell_ns.item_from_path(dest_sub)
-        pending: List[FileEntry] = []
-
-        def flush():
-            """送出一批並驗證。"""
-            if not pending:
-                return False
+    try:
+        for source in plan.sources:
             check_cancel()
-            scheduled, aborted = _copy_chunk(pending, dest_item, owner_hwnd)
-            state.scheduled += scheduled
+            dest_sub = plan.dest_dir / source.name
+            try:
+                dest_sub.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise DestinationError(
+                    "無法建立「{}」：{}".format(dest_sub, exc)
+                ) from exc
 
-            # 驗證掃描：重新讀一次目的地，比對哪些檔名真的落地了。
-            # 這是取代 IFileOperationProgressSink 的作法（決策 D6）——
-            # pywin32 對 progress sink 的支援不完整，而這個作法同時
-            # 給出失敗清單與「重試失敗項目」的基礎。
-            landed = _local_index(dest_sub)
-            for item in pending:
-                if item.key in landed:
-                    report.copied.append(item.name)
-                    existing[item.key] = landed[item.key]
-                else:
-                    report.failed.append(item.name)
-                    log.warning("複製失敗：%s\\%s", source.name, item.name)
-            state.copied = len(report.copied)
-            state.failed = len(report.failed)
-            pending.clear()
+            state.current_folder = source.name
+            existing = _local_index(dest_sub)
+
+            # ---- 第 1 段：列舉 + 過濾 + 增量去重 ----
+            # 這段是我們自己回報進度的地方。MTP 列舉是每項固定成本
+            # （實測 ~3.4 ms/項，跨 session 浮動可達 3 倍），一個 5000 張
+            # 的資料夾要十幾秒，不回報進度使用者會以為當掉。
+            state.phase = CopyPhase.LISTING
+            state.listed = 0
             notify()
-            return aborted
 
-        try:
+            pending: List[FileEntry] = []
             for entry in iter_files(source.abs_pidl, categories):
                 check_cancel()
-                # 增量去重：以檔名為準。
-                # 刻意不比對大小 —— 取來源大小在 MTP 上要每個項目一次來回，
-                # 成本高到會抵銷掉增量備份省下來的時間。
-                # iPhone 的檔名（IMG_xxxx）在同一個資料夾內本來就是唯一的。
+                # 增量去重以檔名為準，刻意不比對大小 ——
+                # 取來源大小在 MTP 上要每個項目一次 GetDetailsOf 來回，
+                # 成本會抵銷掉增量備份省下的時間。
+                # iPhone 的 IMG_xxxx 檔名在同一資料夾內本來就唯一。
                 if entry.key in existing:
                     report.skipped_existing.append(entry.name)
                     state.skipped_existing = len(report.skipped_existing)
                     continue
                 pending.append(entry)
-                if len(pending) >= chunk_size:
-                    if flush():
-                        report.aborted = True
-                        log.info("使用者在原生進度視窗中取消")
-                        return report
-            if flush():
-                report.aborted = True
-                return report
-        except OperationCancelled:
-            report.aborted = True
-            log.info("備份已取消")
-            return report
+                state.listed = len(pending)
+                if state.listed % 50 == 0:
+                    notify()
+            notify()
+
+            if not pending:
+                log.info("「%s」沒有需要複製的檔案（跳過 %d 個已存在）",
+                         source.name, len(report.skipped_existing))
+                continue
+
+            # ---- 第 2 段：一次排程整個資料夾 ----
+            dest_item = shell_ns.item_from_path(dest_sub)
+            batches = ([pending] if not chunk_size
+                       else [pending[i:i + chunk_size]
+                             for i in range(0, len(pending), chunk_size)])
+            if len(batches) > 1:
+                log.warning("強制切成 %d 批 —— 原生進度視窗會出現 %d 次，"
+                            "正常使用不該這樣。", len(batches), len(batches))
+
+            for batch in batches:
+                check_cancel()
+                state.phase = CopyPhase.COPYING
+                notify()
+                log.info("複製「%s」：%d 個檔案", source.name, len(batch))
+                _, aborted = _copy_batch(batch, dest_item, owner_hwnd)
+
+                # ---- 第 3 段：驗證掃描 ----
+                # 取代 IFileOperationProgressSink（決策 D6）。
+                # 搭配 FOF_NOERRORUI，失敗的檔案不會跳「是否略過」小視窗，
+                # 改由這裡比對出來，使用者才拿得到失敗清單與重試的依據。
+                state.phase = CopyPhase.VERIFYING
+                notify()
+                landed = _local_index(dest_sub)
+                for item in batch:
+                    if item.key in landed:
+                        report.copied.append(item.name)
+                        existing[item.key] = landed[item.key]
+                    else:
+                        report.failed.append(item.name)
+                        log.warning("複製失敗：%s\\%s", source.name, item.name)
+                state.copied = len(report.copied)
+                state.failed = len(report.failed)
+                notify()
+
+                if aborted:
+                    report.aborted = True
+                    log.info("使用者在原生進度視窗中取消")
+                    return report
+
+    except OperationCancelled:
+        report.aborted = True
+        log.info("備份已取消")
+        return report
 
     log.info("備份完成：%s", report.summary())
     return report

@@ -37,8 +37,12 @@ EVERYTHING = shellcon.SHCONTF_FOLDERS | shellcon.SHCONTF_NONFOLDERS
 #
 # 證據：在 421 項的資料夾上，取 1 筆 / 10 筆 / 50 筆都是 ~720ms（一次
 # Next(64)），取 200 筆跳到 2654ms（四次），取 421 筆是 4258ms（七次）。
+# 實測（2026-08-27，三個 293~479 項的資料夾）：
+#   完整列舉：batch 1~1024 差不到 3%（都是 ~3.4 ms/項）→ 設多少都一樣
+#   只取第 1 筆：batch=1 約 67 ms，batch=64 約 290 ms，batch=1024 約 1450 ms
+# 所以 DEFAULT_BATCH 不重要，PROBE_BATCH 很重要，而且 1 就是最佳解。
 DEFAULT_BATCH = 64
-PROBE_BATCH = 4     # 早退式探測用：只想知道「有沒有」，不想付整批的錢
+PROBE_BATCH = 1     # 早退式探測用：只想知道「有沒有」，不想付整批的錢
 
 _ENUM_BATCH = DEFAULT_BATCH   # 保留舊名稱
 

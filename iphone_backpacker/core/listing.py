@@ -109,11 +109,12 @@ def folder_has_media(abs_pidl, categories=MEDIA, probe_limit=200,
       否則「自動尋找照片資料夾」會變成掃描整支手機。
     probe_limit 是保險上限，避免在超大資料夾裡白跑。
 
-    ★★ batch 用 PROBE_BATCH（小）而不是 DEFAULT_BATCH。
-      MTP 的成本是「每個被實體化的項目 ~10ms」，而 Next(n) 不管你要
-      幾筆都會準備 n 筆。用 64 去問「有沒有照片」等於付 64 筆的錢拿
-      1 筆的答案 —— 實測在 421 項的資料夾上，取 1 筆和取 50 筆都是
-      ~720ms。早退要真的省到，批次就必須跟著小。
+    ★★ batch 用 PROBE_BATCH（=1）而不是 DEFAULT_BATCH（=64）。
+      MTP 的成本是「每個被實體化的項目」，而 Next(n) 不管呼叫端要幾筆
+      都會準備 n 筆。實測在 293~479 項的資料夾上取第 1 筆：
+        batch=1 → ~67 ms    batch=64 → ~290 ms    batch=1024 → ~1450 ms
+      用 64 去問「有沒有照片」等於付 4 倍的錢。早退要真的省到，
+      批次就必須跟著小。
     """
     seen = 0
     for _, name, _ in shell_ns.iter_entries(abs_pidl, flags=shell_ns.FILES_ONLY,

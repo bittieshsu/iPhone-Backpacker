@@ -104,8 +104,14 @@ def categorize(file_name: str) -> Category   # 一律 os.path.splitext + .lower(
 
 ### `copier.py`
 
-複製是一條 **streaming pipeline**：`iter_files → 分類過濾 → 增量去重 → 每 200 檔送一次 IFileOperation → 驗證掃描`。
-不要先把全部檔案讀成一個大 list 再開始複製，那會產生一段使用者看不到進度的無聲等待。
+複製分三段，**一個來源資料夾 = 一次 `IFileOperation`**（決策 D12）：
+
+1. **列舉 + 過濾 + 去重** —— 我們自己回報「已找到 N 個」
+2. **一次排程整個資料夾** —— 原生進度視窗只出現一次
+3. **驗證掃描** —— 比對目的地，產生失敗清單
+
+不要切成小批次。每次 `PerformOperations()` 有約 600 ms 固定開銷，
+而且原生進度視窗會**每批彈出一次** —— 使用者早期用逐檔複製就是栽在這裡。
 
 ```python
 @dataclass
@@ -125,9 +131,12 @@ def plan_copy(sources, dest_dir: Path, *, incremental: bool = True) -> CopyPlan:
     不在這裡展開來源檔案清單。"""
 
 def run_copy(plan: CopyPlan, categories, *, owner_hwnd=None,
-             chunk_size=200, progress=None) -> CopyReport:
-    """在背景執行緒跑。逐個 source 資料夾 iter_files()，
-    邊過濾邊去重邊排程，每 chunk_size 檔執行一次 IFileOperation + 驗證掃描。
+             chunk_size=None, progress=None, cancel=None) -> CopyReport:
+    """在背景執行緒跑。逐個 source 資料夾：
+    列舉+過濾+去重（自己回報進度）→ 一次 IFileOperation → 驗證掃描。
+
+    ★ chunk_size 預設 None = 不切批。切批會讓原生進度視窗反覆彈出，
+      而且每次 PerformOperations() 有 ~600ms 固定開銷（決策 D12）。
 
     ★ 排程單位永遠是「檔案」，永遠不是「資料夾」。
       整包丟給 shell 遞迴雖然快，但失敗時拿不到是哪個檔案失敗 ——
