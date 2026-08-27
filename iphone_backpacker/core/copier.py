@@ -171,11 +171,25 @@ def _new_operation(owner_hwnd):
 
 
 def _perform(pfo):
-    """執行已排程的操作。回傳 True 表示使用者取消。
+    """執行已排程的操作。回傳 (使用者取消, 有項目被中止)。
 
-    ★ 使用者按取消、或直接關掉原生進度視窗時，PerformOperations() 會拋
-      COPYENGINE_E_USER_CANCELLED。那是**正常結果**，不是錯誤 ——
-      要當成「已取消」處理，不能讓它變成 traceback。
+    ★★ 這兩者必須分開，實測證據（2026-08-28）：
+
+      情況 A：使用者按取消 / 關掉進度視窗
+        → PerformOperations() **拋** COPYENGINE_E_USER_CANCELLED
+        → log：「開始複製：105 個」…「使用者取消了複製」
+                「複製 58 個、尚未複製 47 個」
+        沒複製到的是「還沒輪到」。
+
+      情況 B：有檔案複製不了，被 FOF_NOERRORUI 靜默略過
+        → PerformOperations() **正常返回**，但 GetAnyOperationsAborted() 為真
+        → log：「開始複製：160 個」…「複製 158 個、尚未複製 2 個」
+                （**前面沒有取消那一行**）
+        那 2 個是**真的失敗**，正是使用者最初回報的
+        「有些檔案 Windows 無法複製，略過後沒有任何 log」。
+
+      只看 GetAnyOperationsAborted() 會把 B 誤判成 A，
+      等於把真正的失敗藏進「已取消」裡 —— 那是本專案存在的理由之一。
     """
     try:
         pfo.PerformOperations()
@@ -183,10 +197,14 @@ def _perform(pfo):
         hresult = exc.args[0] if exc.args else None
         if hresult == COPYENGINE_E_USER_CANCELLED:
             log.info("使用者取消了複製（COPYENGINE_E_USER_CANCELLED）")
-            return True
+            return True, True
         raise ShellError("複製作業失敗：{}".format(exc)) from exc
 
-    return bool(pfo.GetAnyOperationsAborted())
+    any_aborted = bool(pfo.GetAnyOperationsAborted())
+    if any_aborted:
+        log.info("PerformOperations 正常返回但 GetAnyOperationsAborted 為真"
+                 " —— 有項目被略過（多半是檔案本身有問題）")
+    return False, any_aborted
 
 
 def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
@@ -291,7 +309,7 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
         return report
 
     log.info("開始複製：%d 個檔案，來自 %d 個資料夾", scheduled, len(jobs))
-    aborted = _perform(pfo)
+    user_cancelled, _any_aborted = _perform(pfo)
 
     # ---- 第 3 段：逐資料夾驗證掃描 ----
     # 取代 IFileOperationProgressSink（決策 D6）。搭配 FOF_NOERRORUI，
@@ -305,21 +323,22 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
             label = "{}\\{}".format(source.name, entry.name)
             if entry.key in landed:
                 report.copied.append(entry.name)
-            elif aborted:
-                # ★ 使用者取消時，沒落地的檔案多半是「還沒輪到」而不是「失敗」。
-                #   我們無法從 IFileOperation 分辨這兩者，所以一律歸到
-                #   cancelled —— 寧可少報失敗，也不要拿一份幾百筆的假失敗
-                #   清單嚇使用者。這些檔案下次備份會自動重試。
+            elif user_cancelled:
+                # 使用者主動取消：沒落地的多半是「還沒輪到」，不是失敗。
+                # 我們無法從 IFileOperation 得知取消當下處理到第幾個，
+                # 一律當成還沒輪到 —— 這些檔案下次備份會自動重試。
                 report.cancelled.append(label)
             else:
+                # 沒有取消卻沒落地 = 真的失敗（被 FOF_NOERRORUI 靜默略過）。
                 report.failed.append(label)
     state.copied = len(report.copied)
     state.failed = len(report.failed)
-    report.aborted = aborted
+    report.aborted = user_cancelled
     notify()
 
-    if aborted:
-        log.info("備份已取消：%s", report.summary())
-    else:
-        log.info("備份完成：%s", report.summary())
+    for label in report.failed:
+        log.warning("複製失敗：%s", label)
+
+    log.info("%s：%s", "備份已取消" if user_cancelled else "備份完成",
+             report.summary())
     return report

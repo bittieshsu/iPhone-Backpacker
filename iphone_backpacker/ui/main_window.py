@@ -12,6 +12,7 @@
 
 import logging
 import re
+import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -47,6 +48,18 @@ HINT_TEXT = (
 )
 
 
+def _format_duration(seconds):
+    """把秒數講成人看得懂的話。"""
+    seconds = max(int(seconds), 1)
+    if seconds < 60:
+        return "約 {} 秒".format(seconds)
+    minutes, rest = divmod(seconds, 60)
+    if minutes < 60:
+        return "約 {} 分 {} 秒".format(minutes, rest)
+    hours, minutes = divmod(minutes, 60)
+    return "約 {} 小時 {} 分".format(hours, minutes)
+
+
 class MainWindow(QMainWindow):
     # 送給 worker 的請求（跨執行緒，自動走 queued connection）
     request_detect = Signal()
@@ -68,6 +81,13 @@ class MainWindow(QMainWindow):
         self._copying = False
         self._cancel_copy = None        # 由 app.py 注入 worker.request_cancel
         self._cancel_count = None       # 由 app.py 注入 worker.request_cancel_count
+        self._last_job = None           # (entries, dest, categories)，供「重試」用
+
+        # 計算一個資料夾要多久。初值保守，之後用實測值自我修正 ——
+        # 成本是「70ms 開場 + 3.4ms × 檔案數」，所以照片多的資料夾差很多。
+        # 實測 112 個資料夾跑了 4 分 17 秒完成 57 個，約 4.5 秒/個。
+        self._count_seconds_per_folder = 4.0
+        self._count_started_at = None
 
         self._count_timer = QTimer(self)
         self._count_timer.setSingleShot(True)
@@ -380,10 +400,12 @@ class MainWindow(QMainWindow):
                          "它們只是還沒輪到就被取消了。".format(len(report.cancelled)))
         if report.failed:
             lines.append("")
-            lines.append("真正失敗的檔案（共 {} 個）：".format(len(report.failed)))
+            lines.append("真正失敗的檔案（共 {} 個）—— Windows 複製不了，"
+                         "多半是檔案本身有問題，重試通常無效：".format(
+                             len(report.failed)))
             lines.extend("  " + n for n in report.failed[:50])
             if len(report.failed) > 50:
-                lines.append("  …（其餘請看 log 檔）")
+                lines.append("  …（完整清單在 log 檔裡）")
         box = QMessageBox(self)
         if report.aborted:
             title, icon = "備份已取消", QMessageBox.Icon.Information
@@ -394,7 +416,20 @@ class MainWindow(QMainWindow):
         box.setWindowTitle(title)
         box.setIcon(icon)
         box.setText("\n".join(lines))
+
+        # 「重試」不需要特別的機制 —— 增量去重會自動跳過已經複製好的，
+        # 所以重跑同一個任務就等於只重試沒完成的那些。
+        retry_button = None
+        if (report.failed or report.cancelled) and self._last_job is not None:
+            retry_button = box.addButton("重試未完成的項目",
+                                         QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("關閉", QMessageBox.ButtonRole.RejectRole)
         box.exec()
+
+        if retry_button is not None and box.clickedButton() is retry_button:
+            entries, dest_dir, categories = self._last_job
+            log.info("使用者要求重試未完成的項目")
+            self._start_copy_job(entries, dest_dir, categories)
 
     def on_copy_failed(self, message):
         self._set_busy(False)
@@ -441,19 +476,19 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("選取的資料夾都已經算過了", 4000)
             return
 
-        # 實測每個資料夾約 0.7 秒（MTP 每次列舉有固定開銷）。
-        # 195 個就要兩分多鐘，先問過再跑，不要讓使用者以為當掉。
-        estimate = len(targets) * 0.7
         if len(targets) > 30:
+            estimate = len(targets) * self._count_seconds_per_folder
             answer = QMessageBox.question(
                 self, "要計算這麼多嗎？",
-                "選取了 {} 個資料夾，估計需要約 {:.0f} 分 {:.0f} 秒。\n"
+                "選取了 {} 個資料夾，估計需要 {}。\n"
+                "照片多的資料夾會比較久，實際時間可能差好幾倍。\n"
                 "計算期間可以隨時按「停止計算」。\n\n要開始嗎？".format(
-                    len(targets), estimate // 60, estimate % 60),
+                    len(targets), _format_duration(estimate)),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes)
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self._count_started_at = time.perf_counter()
 
         self.tree.blockSignals(True)
         for item in targets:
@@ -485,11 +520,24 @@ class MainWindow(QMainWindow):
             "正在取消…如果 Windows 的複製視窗還開著，請在那裡按取消")
 
     def on_count_batch_progress(self, done, total):
+        remaining_text = ""
+        if self._count_started_at is not None and done > 0:
+            elapsed = time.perf_counter() - self._count_started_at
+            per_folder = elapsed / done
+            if done >= 3:
+                # 用實測值自我修正，下次估計就會準一些。
+                self._count_seconds_per_folder = per_folder
+            if done < total:
+                remaining_text = "，剩餘約 {}".format(
+                    _format_duration(per_folder * (total - done)))
+
         if done >= total:
             self.btn_stop_count.setEnabled(False)
+            self._count_started_at = None
             self.statusBar().showMessage("計算完成（{} 個資料夾）".format(total), 6000)
         else:
-            self.statusBar().showMessage("計算中… {} / {}".format(done, total))
+            self.statusBar().showMessage(
+                "計算中… {} / {}{}".format(done, total, remaining_text))
 
     def _on_choose_dest(self):
         path = QFileDialog.getExistingDirectory(self, "選擇備份到哪個資料夾")
@@ -509,9 +557,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "還沒選目的地",
                                     "請先按「選擇目的地…」指定要備份到哪裡。")
             return
+        self._start_copy_job(entries, self._dest_dir, self._categories)
+
+    def _start_copy_job(self, entries, dest_dir, categories):
+        self._last_job = (entries, dest_dir, categories)
         self._set_busy(True)
-        self.request_copy.emit(entries, self._dest_dir, self._categories,
-                               int(self.winId()))
+        self.request_copy.emit(entries, dest_dir, categories, int(self.winId()))
 
     def _set_busy(self, busy):
         self._copying = busy
