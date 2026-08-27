@@ -178,12 +178,28 @@
 
 ---
 
-## 階段 6 — 打包與散布 ⬜ 未開始
+## 階段 6 — 打包與散布 ✅ 程式碼完成，待實測
 
-- [ ] PyInstaller **`--onedir`**（不要 `--onefile`）再壓 zip
-- [ ] manifest 設 `asInvoker`（**不要**要求管理員權限）
-- [ ] 首次啟動引導：說明「自動 vs 保留原始檔」，提醒改設定要重新插拔
-- [ ] 改寫 README：目標平台改標 Windows 10/11，加上 SmartScreen「其他資訊 → 仍要執行」說明
+- [x] `iphone_backpacker.spec`：onedir、`upx=False`、`console=False`、
+      `uac_admin=False`（asInvoker）、排除用不到的 Qt 模組
+- [x] `build.bat` 一鍵打包
+- [x] `.gitignore`（build/、dist/、`__pycache__`、測試用的 `z/`）
+- [x] 首次啟動引導（`ui/dialogs.py`）+ 工具列「使用說明」按鈕
+- [x] 改寫 README：平台改標 Windows 10/11、SmartScreen 與防毒誤判的說明、
+      log 檔位置、打包方式
+- [x] 移除舊的 `iphoneCopyOneFolder.py` / `iphoneCopyByConfig.py` / `EditThis.txt`
+- [ ] **⚠ 待實測**：`build.bat` 能不能成功打包
+- [ ] **⚠ 待實測**：打包後的 exe 能不能正常瀏覽與備份
+- [ ] **⚠ 待量測**：打包後的啟動時間（開發模式是 import 2.3 秒 + 初始化 0.1 秒）
+
+### 打包後最可能出問題的地方
+
+1. **`EXCLUDES` 排太多** → 執行時噴 ImportError。
+   第一步就是把 `iphone_backpacker.spec` 裡的 `EXCLUDES` 清空再打包一次。
+2. **pywin32 的 shell 擴充沒被收進去** → 已在 `hiddenimports` 補上
+   `win32com.shell.shell` 等，但實機才知道夠不夠。
+3. **`console=False` 之後任何殘留的 `print()` 都會閃退**。
+   目前 `iphone_backpacker/` 底下已經零 print，但改 code 時要守住這條。
 
 ---
 

@@ -28,20 +28,30 @@ Python 標準函式庫（`os` / `pathlib` / `shutil`）**完全看不到手機�
 
 ## 目前程式碼盤點
 
-| 檔案 | 角色 | 去留 |
-|---|---|---|
-| `iphoneCopyOneFolder.py` | Shell COM 核心 + CLI 進入點 | **拆解**成 `core/`，COM 邏輯保留、字串路徑解析層刪除 |
-| `iphoneCopyByConfig.py` | 讀 `EditThis.txt` 的驅動腳本 | GUI 完成後**淘汰** |
-| `EditThis.txt` | 使用者設定檔 | GUI 完成後**淘汰** |
+```
+iphone_backpacker/
+  core/     純邏輯，零 Qt、零 print（errors / logging_setup / filters /
+            shell_ns / listing / device / copier）
+  ui/       PySide6（main_window / workers / dialogs）
+  app.py    進入點
+run_gui.py            開發用啟動腳本
+iphone_backpacker.spec / build.bat    PyInstaller 打包
+tools/                煙霧測試與效能 benchmark
+tests/                純 Python 單元測試（不需要 Windows）
+```
 
-### 已知會被刪掉的東西（不要花力氣修）
+### 已經移除的舊版（階段 6，需要時從 git 歷史取回）
 
-`parseAbsName` / `iter_split` / `checkFolderName` / `getFolderObject_byAbsPath` / `ChineseCharacterChecking`
-—— 這整套字串路徑解析層存在的唯一理由是「把 txt 裡的字串轉回 shell 物件」。
-GUI 化後使用者點的節點**手上就已經握著 PIDL**，整套可以刪除。這是 GUI 化帶來的最大簡化。
+`iphoneCopyOneFolder.py` / `iphoneCopyByConfig.py` / `EditThis.txt`
 
-`appendSequence` / `getNumAndSuffix`（`100APPLE ~ 105APPLE` 序號展開）
-—— 在新版 iOS 的日期式資料夾命名下已經失效，由「自動尋找照片資料夾」功能取代。
+隨之消失的東西，**不要再重新引入**：
+
+- `parseAbsName` / `iter_split` / `checkFolderName` / `getFolderObject_byAbsPath` /
+  `ChineseCharacterChecking` —— 整套字串路徑解析層。存在的唯一理由是
+  「把 txt 裡的字串轉回 shell 物件」；GUI 的節點手上就握著 PIDL，不需要反查。
+  這也是 iOS 改資料夾結構會打爆舊版的根源。
+- `appendSequence` / `getNumAndSuffix`（`100APPLE ~ 105APPLE` 序號展開）——
+  在日期式資料夾命名下已經失效。
 
 ## 使用者實際回報的問題
 

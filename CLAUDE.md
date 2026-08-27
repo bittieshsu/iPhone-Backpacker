@@ -9,7 +9,9 @@ iPhone 接上 Windows 走 **PTP/MTP**，在檔案總管看得到但**沒有磁�
 本專案透過 Windows Shell COM（`IShellFolder` / `IShellItem` / `IFileOperation`）存取，
 這是檔案總管本身用的那條路。**這一關已經解掉了，不要因為任何理由重寫成別的方案。**
 
-目前狀態：CLI 版可用（靠 `EditThis.txt` 設定路徑），正在改造成 PySide6 GUI。
+目前狀態：PySide6 GUI 已在真機驗證可用（瀏覽、勾選、批次計算、備份、取消、重試）。
+舊的 CLI 版（`iphoneCopyOneFolder.py` / `iphoneCopyByConfig.py` / `EditThis.txt`）
+已於階段 6 移除，需要時從 git 歷史取回。
 
 ## 開始工作前必讀
 
