@@ -1,0 +1,14 @@
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 測試用的暫存資料夾
+z/

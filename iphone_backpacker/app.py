@@ -16,6 +16,7 @@ from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
 from .core.logging_setup import setup_logging
+from .ui import dialogs
 from .ui.main_window import MainWindow
 from .ui.workers import ShellWorker
 
@@ -71,6 +72,10 @@ def main():
 
     thread.start()
     window.show()
+
+    # 首次啟動的引導。放在 show() 之後 —— 主視窗要先出現在後面，
+    # 使用者關掉說明就能直接操作。
+    dialogs.maybe_show_guide(window)
 
     # 視窗已經顯示之後才發請求 —— 使用者看到的是「立刻開啟」而不是「卡兩秒」。
     window.request_detect.emit()

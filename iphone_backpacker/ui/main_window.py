@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from ..core import device as core_device
 from ..core import filters
 from ..core.copier import CopyPhase
+from . import dialogs
 
 log = logging.getLogger(__name__)
 
@@ -41,10 +42,10 @@ CATEGORY_CHOICES = [
 ]
 
 HINT_TEXT = (
-    "<b>提示：</b>iPhone 的「設定 → App → 相簿 → 傳送到 Mac 或 PC」有兩種模式。"
-    "<b>自動</b> 會由手機即時轉檔成 .jpg / .mov（傳輸較慢）；"
-    "<b>保留原始檔</b> 直接給 .heic / .heif / .mov。"
+    "<b>提示：</b>iPhone 的「設定 → App → 相簿 → 傳送到 Mac 或 PC」有兩種模式，"
+    "決定你拿到的是 .jpg／.mov 還是 .heic／.mov。"
     "<b>改完設定要把 USB 線拔掉重插才會生效。</b>"
+    "　詳情請按右上角的「使用說明」。"
 )
 
 
@@ -148,8 +149,16 @@ class MainWindow(QMainWindow):
         bar = QHBoxLayout()
 
         self.btn_refresh = QPushButton("重新整理裝置")
+        self.btn_refresh.setToolTip(
+            "重新偵測 iPhone 並重新列出資料夾。\n"
+            "MTP 偶爾會回傳不完整的清單，這是 Windows 的已知問題，"
+            "按這顆通常就好了。")
         self.btn_refresh.clicked.connect(self._on_refresh)
         bar.addWidget(self.btn_refresh)
+
+        self.btn_help = QPushButton("使用說明")
+        self.btn_help.clicked.connect(lambda: dialogs.show_guide(self))
+        bar.addWidget(self.btn_help)
 
         # ★ 這兩顆按鈕的作用範圍不是「整棵樹」，而是「目前選取節點的底下」。
         #   使用者回報「全不選」讓人以為會清掉所有勾選，需要明確說明。
