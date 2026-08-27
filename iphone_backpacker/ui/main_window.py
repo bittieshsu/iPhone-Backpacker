@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
     request_roots = Signal()
     request_subfolders = Signal(object)
     request_count = Signal(object, object)
+    request_count_batch = Signal(object, object)
     request_copy = Signal(object, str, object, int)
     request_clear_cache = Signal()
 
@@ -64,6 +65,8 @@ class MainWindow(QMainWindow):
         self._file_counts = {}          # pidl -> 檔案數
         self._pending_count = None
         self._copying = False
+        self._cancel_copy = None        # 由 app.py 注入 worker.request_cancel
+        self._cancel_count = None       # 由 app.py 注入 worker.request_cancel_count
 
         self._count_timer = QTimer(self)
         self._count_timer.setSingleShot(True)
@@ -97,7 +100,9 @@ class MainWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["資料夾", "檔案數"])
         self.tree.setColumnWidth(0, 420)
-        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # ★ 多選：使用者可以用滑鼠拖曳框選、或 Ctrl / Shift 複選，
+        #   再按「計算檔案數」一次算一批。184 個資料夾一個一個點不切實際。
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.itemExpanded.connect(self._on_item_expanded)
         self.tree.currentItemChanged.connect(self._on_current_changed)
         self.tree.itemChanged.connect(self._on_item_changed)
@@ -134,6 +139,19 @@ class MainWindow(QMainWindow):
         self.btn_uncheck_all.clicked.connect(lambda: self._set_all_checked(False))
         bar.addWidget(self.btn_uncheck_all)
 
+        self.btn_count = QPushButton("計算檔案數")
+        self.btn_count.setToolTip(
+            "算出選取資料夾裡的檔案數。\n"
+            "可以用滑鼠拖曳框選、或按住 Ctrl / Shift 複選多個資料夾。\n"
+            "沒有選取時，會計算目前節點底下所有已載入的資料夾。")
+        self.btn_count.clicked.connect(self._on_count_selected)
+        bar.addWidget(self.btn_count)
+
+        self.btn_stop_count = QPushButton("停止計算")
+        self.btn_stop_count.setEnabled(False)
+        self.btn_stop_count.clicked.connect(self._on_stop_count)
+        bar.addWidget(self.btn_stop_count)
+
         bar.addSpacing(16)
         bar.addWidget(QLabel("備份類型："))
         self.combo_category = QComboBox()
@@ -152,7 +170,22 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self._on_start_copy)
         bar.addWidget(self.btn_start)
 
+        self.btn_cancel = QPushButton("取消備份")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._on_cancel_copy)
+        bar.addWidget(self.btn_cancel)
+
         return bar
+
+    def set_cancel_hooks(self, cancel_copy, cancel_count):
+        """由 app.py 注入 worker 的取消函式。
+
+        ★ 這是唯一直接跨執行緒呼叫 worker 的地方。取消必須立刻生效，
+          走 signal/slot 會排在正在執行的任務後面，等於沒有取消功能。
+          被呼叫的兩個函式內部只動 threading.Event，是執行緒安全的。
+        """
+        self._cancel_copy = cancel_copy
+        self._cancel_count = cancel_count
 
     # ------------------------------------------------------------------
     # 樹狀操作
@@ -318,7 +351,12 @@ class MainWindow(QMainWindow):
 
     def on_copy_finished(self, report):
         self._set_busy(False)
+        self.progress.setFormat("")
         lines = [report.summary()]
+        if report.aborted:
+            lines.append("")
+            lines.append("備份被取消了，但已經複製完成的檔案會保留，"
+                         "下次再備份時會自動跳過。")
         if report.failed:
             lines.append("")
             lines.append("失敗的檔案（共 {} 個）：".format(len(report.failed)))
@@ -326,9 +364,14 @@ class MainWindow(QMainWindow):
             if len(report.failed) > 50:
                 lines.append("  …（其餘請看 log 檔）")
         box = QMessageBox(self)
-        box.setWindowTitle("備份完成" if report.ok else "備份結束，但有問題")
-        box.setIcon(QMessageBox.Icon.Information if report.ok
-                    else QMessageBox.Icon.Warning)
+        if report.aborted:
+            title, icon = "備份已取消", QMessageBox.Icon.Information
+        elif report.ok:
+            title, icon = "備份完成", QMessageBox.Icon.Information
+        else:
+            title, icon = "備份結束，但有些檔案失敗", QMessageBox.Icon.Warning
+        box.setWindowTitle(title)
+        box.setIcon(icon)
         box.setText("\n".join(lines))
         box.exec()
 
@@ -360,6 +403,59 @@ class MainWindow(QMainWindow):
             item.setText(1, "—")
         self._update_detail()
 
+    def _on_count_selected(self):
+        """把選取的資料夾排進批次計算。
+
+        有選取就算選取的，沒選取就算目前節點底下所有已載入的資料夾。
+        """
+        selected = [i for i in self.tree.selectedItems()
+                    if i.data(0, PIDL_ROLE) is not None and not i.isDisabled()]
+        if not selected:
+            current = self.tree.currentItem()
+            scope = current if current is not None and current.childCount() else None
+            selected = list(self._iter_items(scope))
+        targets = [i for i in selected
+                   if i.data(0, PIDL_ROLE) not in self._file_counts]
+        if not targets:
+            self.statusBar().showMessage("選取的資料夾都已經算過了", 4000)
+            return
+
+        self.tree.blockSignals(True)
+        for item in targets:
+            item.setText(1, "排隊中…")
+        self.tree.blockSignals(False)
+
+        self.btn_stop_count.setEnabled(True)
+        self.statusBar().showMessage(
+            "開始計算 {} 個資料夾…".format(len(targets)), 4000)
+        self.request_count_batch.emit(
+            [i.data(0, PIDL_ROLE) for i in targets], self._categories)
+
+    def _on_stop_count(self):
+        if self._cancel_count is not None:
+            self._cancel_count()
+        self.btn_stop_count.setEnabled(False)
+        self.statusBar().showMessage("已要求停止計算", 4000)
+        self.tree.blockSignals(True)
+        for item in self._iter_items():
+            if item.text(1) in ("排隊中…", "計算中…"):
+                item.setText(1, "—")
+        self.tree.blockSignals(False)
+
+    def _on_cancel_copy(self):
+        if self._cancel_copy is not None:
+            self._cancel_copy()
+        self.btn_cancel.setEnabled(False)
+        self.progress.setFormat(
+            "正在取消…如果 Windows 的複製視窗還開著，請在那裡按取消")
+
+    def on_count_batch_progress(self, done, total):
+        if done >= total:
+            self.btn_stop_count.setEnabled(False)
+            self.statusBar().showMessage("計算完成（{} 個資料夾）".format(total), 6000)
+        else:
+            self.statusBar().showMessage("計算中… {} / {}".format(done, total))
+
     def _on_choose_dest(self):
         path = QFileDialog.getExistingDirectory(self, "選擇備份到哪個資料夾")
         if path:
@@ -388,8 +484,14 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0 if busy else 1)
         for widget in (self.btn_start, self.btn_refresh, self.btn_dest,
                        self.btn_check_all, self.btn_uncheck_all,
-                       self.combo_category):
+                       self.btn_count, self.combo_category):
             widget.setEnabled(not busy)
+        self.btn_cancel.setEnabled(busy)
+        if busy:
+            # 只有一條 worker 執行緒，備份期間其他 Shell 操作會排隊。
+            # 講清楚，不然看起來像當掉。
+            self.progress.setFormat("備份進行中…（期間點選資料夾不會計算檔案數）")
+            self.statusBar().showMessage("備份進行中")
 
     # ------------------------------------------------------------------
     # 雜項

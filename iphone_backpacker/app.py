@@ -8,6 +8,9 @@
 
 import logging
 import sys
+import time
+
+_T0 = time.perf_counter()
 
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
@@ -25,6 +28,7 @@ def _connect(window, worker):
     window.request_roots.connect(worker.load_roots)
     window.request_subfolders.connect(worker.load_subfolders)
     window.request_count.connect(worker.count_files)
+    window.request_count_batch.connect(worker.count_files_batch)
     window.request_copy.connect(worker.start_copy)
     window.request_clear_cache.connect(worker.clear_cache)
 
@@ -34,6 +38,7 @@ def _connect(window, worker):
     worker.subfolders_ready.connect(window.on_subfolders_ready)
     worker.subfolders_failed.connect(window.on_subfolders_failed)
     worker.file_count_ready.connect(window.on_file_count_ready)
+    worker.count_batch_progress.connect(window.on_count_batch_progress)
     worker.copy_progress.connect(window.on_copy_progress)
     worker.copy_finished.connect(window.on_copy_finished)
     worker.copy_failed.connect(window.on_copy_failed)
@@ -54,6 +59,8 @@ def main():
 
     window = MainWindow()
     _connect(window, worker)
+    # 取消必須立刻生效，不能走 signal/slot（會排在正在執行的任務後面）。
+    window.set_cancel_hooks(worker.request_cancel, worker.request_cancel_count)
 
     def shutdown():
         worker.request_cancel()
@@ -69,6 +76,14 @@ def main():
     window.request_detect.emit()
     window.request_roots.emit()
 
+    import_ms = getattr(sys.modules["__main__"], "_IMPORT_MS", None)
+    if import_ms is not None:
+        # 使用者回報首次啟動要 7 秒、第二次 3 秒。實測從 setup_logging 到這裡
+        # 只有約 1.2 秒，其餘全是 Python 直譯器啟動 + PySide6 import ——
+        # 那發生在我們的程式碼之前，開發模式下無法改善。
+        # PyInstaller --onedir 打包後會明顯變快（階段 6）。
+        log.info("啟動耗時：import %.0f ms + 初始化 %.0f ms",
+                 import_ms, (time.perf_counter() - _T0) * 1000)
     log.info("啟動完成，log 檔：%s", log_path)
     return app.exec()
 

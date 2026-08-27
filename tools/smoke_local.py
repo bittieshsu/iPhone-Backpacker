@@ -105,11 +105,15 @@ def main():
                            lambda: copier.run_copy(plan, categories))
         log.info("第二次：%s", report2.summary())
 
+        # 判定要能容忍「目的地已經有檔案」的情況 ——
+        # 那時第一次執行就會全部跳過，不代表壞掉。
+        # 真正該成立的是：兩次跑完之後每個檔案都在，而且第二次不再複製。
+        landed = len(report.copied) + len(report.skipped_existing)
         ok = (
-            len(report.copied) == len(files)
+            landed == len(files)
             and not report.failed
-            and len(report2.skipped_existing) == len(files)
             and not report2.copied
+            and len(report2.skipped_existing) == len(files)
         )
         log.info("結果：%s", "通過" if ok else "不如預期，請看上面的數字")
         return 0 if ok else 1

@@ -39,6 +39,7 @@ class ShellWorker(QObject):
 
     # 資料夾摘要（背景算，永不阻塞選取）
     file_count_ready = Signal(object, int)          # folder_pidl, count
+    count_batch_progress = Signal(int, int)         # 已完成, 總數
 
     # 複製
     copy_progress = Signal(object)                  # CopyProgress
@@ -49,6 +50,7 @@ class ShellWorker(QObject):
         super().__init__()
         self.cache = listing.NamespaceCache()
         self._cancel = threading.Event()
+        self._cancel_count = threading.Event()
 
     # ---- 執行緒生命週期 ----
 
@@ -62,9 +64,15 @@ class ShellWorker(QObject):
         pythoncom.CoUninitialize()
         log.info("worker 執行緒已離開 COM apartment")
 
+    # ★ 這兩個是**唯一**可以由主執行緒直接呼叫的方法。
+    #   threading.Event 本身是執行緒安全的，而且必須立刻生效 ——
+    #   走 signal/slot 的話會排在正在執行的任務後面，等於沒有取消功能。
+
     def request_cancel(self):
-        """由主執行緒呼叫。threading.Event 本身就是執行緒安全的。"""
         self._cancel.set()
+
+    def request_cancel_count(self):
+        self._cancel_count.set()
 
     # ---- 任務 ----
 
@@ -109,17 +117,45 @@ class ShellWorker(QObject):
 
     @Slot(object, object)
     def count_files(self, folder_pidl, categories):
-        """算資料夾裡的檔案數。
+        """算單一資料夾裡的檔案數。
 
         ★ 這是**慢**操作（~3.4 ms/項），只在使用者停在某個節點時才做，
           而且算不完也不影響勾選與備份（效能契約 D8）。
         """
+        count = self._count_one(folder_pidl, categories)
+        if count is not None:
+            self.file_count_ready.emit(folder_pidl, count)
+
+    @Slot(object, object)
+    def count_files_batch(self, folder_pidls, categories):
+        """一次算多個資料夾。
+
+        使用者的 iPhone 有 184 個日期資料夾，一個一個點著等太慢；
+        框選一批再一次算才符合實際用法。
+
+        序列執行 —— MTP 不適合並行存取。每算完一個就 emit，
+        使用者會看到數字一個一個填上去，而不是等到全部算完。
+        """
+        self._cancel_count.clear()
+        total = len(folder_pidls)
+        log.info("開始批次計算 %d 個資料夾的檔案數", total)
+        for index, pidl in enumerate(folder_pidls, 1):
+            if self._cancel_count.is_set():
+                log.info("批次計算已取消（完成 %d / %d）", index - 1, total)
+                break
+            count = self._count_one(pidl, categories)
+            if count is not None:
+                self.file_count_ready.emit(pidl, count)
+            self.count_batch_progress.emit(index, total)
+        else:
+            log.info("批次計算完成")
+
+    def _count_one(self, folder_pidl, categories):
         try:
-            count = sum(1 for _ in listing.iter_files(folder_pidl, categories))
+            return sum(1 for _ in listing.iter_files(folder_pidl, categories))
         except BackpackerError as exc:
             log.debug("計算檔案數失敗：%s", exc)
-            return
-        self.file_count_ready.emit(folder_pidl, count)
+            return None
 
     @Slot(object, str, object, int)
     def start_copy(self, sources, dest_dir, categories, owner_hwnd):

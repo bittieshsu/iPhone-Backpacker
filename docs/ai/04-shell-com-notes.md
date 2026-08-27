@@ -361,6 +361,21 @@ v3 已改為以「回傳 0 項的旗標仍耗時」為主要判準。）
 
 ---
 
+## `IFileOperation` 的錯誤碼
+
+| HRESULT | 十進位 | 意義 | 怎麼處理 |
+|---|---|---|---|
+| `0x8000FFFF` | -2147418113 | `E_UNEXPECTED` | **零排程**時 `PerformOperations()` 就回這個。呼叫前一定要 guard。 |
+| `0x80270000` | -2144927744 | `COPYENGINE_E_USER_CANCELLED` | 使用者按取消或關掉進度視窗。**這是正常結果，不是錯誤。** |
+
+`COPYENGINE_*` 系列的錯誤碼都落在 `0x8027xxxx`。
+不要把它們一律當成例外往上拋 —— 使用者取消會被顯示成「備份失敗」，
+而且 log 裡會出現嚇人的 traceback。
+
+**取消一個大任務時 `PerformOperations()` 會阻塞很久**（Windows 自己在收尾，
+目的地是慢速隨身碟時特別明顯）。這段期間 worker 執行緒被卡住，
+無法中斷 —— COM 呼叫沒有取消機制。UI 要把這件事講清楚。
+
 ## 打包相關的坑
 
 - **PyInstaller `--windowed` 後 `sys.stdout` / `sys.stderr` 是 `None`**，

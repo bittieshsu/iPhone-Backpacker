@@ -5,16 +5,22 @@
   那正是使用者用檔案總管複製整個資料夾時遇到的「不穩定」。
   逐檔排程才換得到失敗清單、重試能力與增量去重。
 
-★★ 一個來源資料夾 = 一次 IFileOperation（決策 D12）。
+★★ 一整個備份任務 = 一次 IFileOperation（決策 D12，2026-08-27 修訂）。
   使用者實測過：用 copyShellItem() 逐檔各開一次操作「超級慢」，
   而且 **Windows 的原生進度視窗會反覆彈出**。切成小批次是同一個問題的
   縮小版 —— 每次 PerformOperations() 有約 600 ms 固定開銷，一個 5000 張
   的資料夾切 200 一批就是 25 次視窗 + 15 秒純浪費。
 
-  所以流程改成兩段：
-    第 1 段 列舉 + 過濾 + 去重 → 這段由我們自己回報進度（「已找到 N 個」）
-    第 2 段 一次把整個資料夾排程進單一 IFileOperation → 原生進度視窗只出現一次
-    第 3 段 驗證掃描 → 失敗清單
+  最初改成「一個資料夾一次操作」，但實測選 5 個資料夾就跳 5 次視窗。
+  IFileOperation 允許同一次操作裡每個項目有**不同的目的地**，
+  所以整個任務不管幾個資料夾都只需要一次 PerformOperations()。
+
+  流程：
+    第 1 段 走過所有來源資料夾，列舉 + 過濾 + 去重
+            → 這段由我們自己回報進度（「已找到 N 個」）
+    第 2 段 把全部檔案排程進**單一** IFileOperation（每個檔案帶自己的目的地）
+            → 原生進度視窗只出現一次
+    第 3 段 逐資料夾驗證掃描 → 失敗清單
 
   第 2 段不需要我們畫進度：IFileOperation 的原生視窗本來就有
   逐檔進度、剩餘時間與取消鈕，品質比自己畫的高。
@@ -45,9 +51,10 @@ log = logging.getLogger(__name__)
 # 而那個視窗的品質比我們自己畫的高。
 _OPERATION_FLAGS = shellcon.FOF_NOCONFIRMATION | shellcon.FOF_NOERRORUI
 
-# 預設不切批：一個來源資料夾 = 一次 IFileOperation（決策 D12）。
-# 這個常數只保留給診斷用途，正常路徑不該用到。
-DIAGNOSTIC_CHUNK_SIZE = 200
+# PerformOperations() 在使用者按下取消（或關掉進度視窗）時回這個 HRESULT。
+# 0x80270000 = COPYENGINE_E_USER_CANCELLED。
+# ★ 這是正常結果，不是錯誤 —— 不能讓它變成 traceback 嚇到使用者。
+COPYENGINE_E_USER_CANCELLED = -2144927744
 
 
 class CopyPhase(Enum):
@@ -142,17 +149,7 @@ def _local_index(directory):
     return index
 
 
-def _copy_batch(entries, dest_item, owner_hwnd):
-    """把一整批檔案送進**單一** IFileOperation。
-
-    回傳 (成功排程數, 是否被中途取消)。
-    原生進度視窗在 PerformOperations() 期間出現一次，結束後關閉。
-    """
-    if not entries:
-        # ★ PerformOperations() 在零排程時會回 0x8000FFFF (E_UNEXPECTED)，
-        #   也就是使用者回報的 -2147418113「災難性的失敗」。必須擋在這裡。
-        return 0, False
-
+def _new_operation(owner_hwnd):
     try:
         pfo = pythoncom.CoCreateInstance(
             shell.CLSID_FileOperation, None,
@@ -165,36 +162,36 @@ def _copy_batch(entries, dest_item, owner_hwnd):
     if owner_hwnd:
         # 把 Windows 原生進度視窗掛在主視窗底下，否則它會變成孤兒視窗。
         pfo.SetOwnerWindow(owner_hwnd)
+    return pfo
 
-    scheduled = 0
-    for entry in entries:
-        try:
-            pfo.CopyItem(shell_ns.shell_item(entry.abs_pidl), dest_item, None)
-            scheduled += 1
-        except (pythoncom.com_error, ShellError) as exc:
-            # 排程階段就失敗的個別項目不該拖垮整批，交給驗證掃描去記錄。
-            log.warning("排程失敗，略過：%s（%s）", entry.name, exc)
 
-    if scheduled == 0:
-        return 0, False
+def _perform(pfo):
+    """執行已排程的操作。回傳 True 表示使用者取消。
 
+    ★ 使用者按取消、或直接關掉原生進度視窗時，PerformOperations() 會拋
+      COPYENGINE_E_USER_CANCELLED。那是**正常結果**，不是錯誤 ——
+      要當成「已取消」處理，不能讓它變成 traceback。
+    """
     try:
         pfo.PerformOperations()
     except pythoncom.com_error as exc:
+        hresult = exc.args[0] if exc.args else None
+        if hresult == COPYENGINE_E_USER_CANCELLED:
+            log.info("使用者取消了複製（COPYENGINE_E_USER_CANCELLED）")
+            return True
         raise ShellError("複製作業失敗：{}".format(exc)) from exc
 
-    return scheduled, bool(pfo.GetAnyOperationsAborted())
+    return bool(pfo.GetAnyOperationsAborted())
 
 
 def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
-             chunk_size=None, progress=None, cancel=None):
-    """執行複製。**必須在 worker thread 且已進入 COM apartment。**
-
-    chunk_size=None（預設）表示「一個來源資料夾一次操作」，見模組 docstring。
-    只有在需要診斷單一大資料夾時才傳入數字強制切批，正常情況不要用。
+             progress=None, cancel=None):
+    """執行備份。**必須在 worker thread 且已進入 COM apartment。**
 
     progress: 可選的 callable，收一個 CopyProgress。
     cancel:   可選的 callable，回傳 True 表示使用者要求取消。
+              只在「列舉」階段有效；一旦進入 PerformOperations()，
+              取消要靠原生進度視窗上的按鈕。
     """
     report = CopyReport()
     state = CopyProgress()
@@ -210,6 +207,12 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
     log.info("開始備份：%d 個資料夾 → %s（%s）",
              len(plan.sources), plan.dest_dir, describe(categories))
 
+    # ---- 第 1 段：列舉 + 過濾 + 增量去重 ----
+    # 這段是我們自己回報進度的地方。MTP 列舉每項約 3.4 ms（跨 session 浮動
+    # 可達 3 倍），幾百張就要好幾秒，不回報進度使用者會以為當掉。
+    state.phase = CopyPhase.LISTING
+    jobs = []   # [(source, dest_sub, [FileEntry, ...]), ...]
+
     try:
         for source in plan.sources:
             check_cancel()
@@ -218,21 +221,13 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
                 dest_sub.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise DestinationError(
-                    "無法建立「{}」：{}".format(dest_sub, exc)
-                ) from exc
+                    "無法建立「{}」：{}".format(dest_sub, exc)) from exc
 
             state.current_folder = source.name
-            existing = _local_index(dest_sub)
-
-            # ---- 第 1 段：列舉 + 過濾 + 增量去重 ----
-            # 這段是我們自己回報進度的地方。MTP 列舉是每項固定成本
-            # （實測 ~3.4 ms/項，跨 session 浮動可達 3 倍），一個 5000 張
-            # 的資料夾要十幾秒，不回報進度使用者會以為當掉。
-            state.phase = CopyPhase.LISTING
-            state.listed = 0
             notify()
 
-            pending: List[FileEntry] = []
+            existing = _local_index(dest_sub)
+            pending = []
             for entry in iter_files(source.abs_pidl, categories):
                 check_cancel()
                 # 增量去重以檔名為準，刻意不比對大小 ——
@@ -244,59 +239,75 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
                     state.skipped_existing = len(report.skipped_existing)
                     continue
                 pending.append(entry)
-                state.listed = len(pending)
+                state.listed += 1
                 if state.listed % 50 == 0:
                     notify()
-            notify()
 
-            if not pending:
-                log.info("「%s」沒有需要複製的檔案（跳過 %d 個已存在）",
-                         source.name, len(report.skipped_existing))
-                continue
-
-            # ---- 第 2 段：一次排程整個資料夾 ----
-            dest_item = shell_ns.item_from_path(dest_sub)
-            batches = ([pending] if not chunk_size
-                       else [pending[i:i + chunk_size]
-                             for i in range(0, len(pending), chunk_size)])
-            if len(batches) > 1:
-                log.warning("強制切成 %d 批 —— 原生進度視窗會出現 %d 次，"
-                            "正常使用不該這樣。", len(batches), len(batches))
-
-            for batch in batches:
-                check_cancel()
-                state.phase = CopyPhase.COPYING
-                notify()
-                log.info("複製「%s」：%d 個檔案", source.name, len(batch))
-                _, aborted = _copy_batch(batch, dest_item, owner_hwnd)
-
-                # ---- 第 3 段：驗證掃描 ----
-                # 取代 IFileOperationProgressSink（決策 D6）。
-                # 搭配 FOF_NOERRORUI，失敗的檔案不會跳「是否略過」小視窗，
-                # 改由這裡比對出來，使用者才拿得到失敗清單與重試的依據。
-                state.phase = CopyPhase.VERIFYING
-                notify()
-                landed = _local_index(dest_sub)
-                for item in batch:
-                    if item.key in landed:
-                        report.copied.append(item.name)
-                        existing[item.key] = landed[item.key]
-                    else:
-                        report.failed.append(item.name)
-                        log.warning("複製失敗：%s\\%s", source.name, item.name)
-                state.copied = len(report.copied)
-                state.failed = len(report.failed)
-                notify()
-
-                if aborted:
-                    report.aborted = True
-                    log.info("使用者在原生進度視窗中取消")
-                    return report
-
+            log.info("「%s」：待複製 %d 個、跳過 %d 個",
+                     source.name, len(pending), len(existing))
+            if pending:
+                jobs.append((source, dest_sub, pending))
+        notify()
     except OperationCancelled:
         report.aborted = True
-        log.info("備份已取消")
+        log.info("備份在列舉階段被取消")
         return report
 
-    log.info("備份完成：%s", report.summary())
+    if not jobs:
+        log.info("沒有需要複製的檔案（全部已存在）")
+        return report
+
+    # ---- 第 2 段：全部排程進單一 IFileOperation ----
+    # ★ 每個 CopyItem 可以帶自己的目的地，所以不管幾個資料夾都只要一次操作，
+    #   原生進度視窗只彈一次（決策 D12）。
+    state.phase = CopyPhase.COPYING
+    state.current_folder = "全部"
+    notify()
+
+    pfo = _new_operation(owner_hwnd)
+    scheduled = 0
+    for source, dest_sub, pending in jobs:
+        dest_item = shell_ns.item_from_path(dest_sub)
+        for entry in pending:
+            try:
+                pfo.CopyItem(shell_ns.shell_item(entry.abs_pidl), dest_item, None)
+                scheduled += 1
+            except (pythoncom.com_error, ShellError) as exc:
+                # 排程階段就失敗的個別項目不該拖垮整批，
+                # 交給第 3 段的驗證掃描去記錄。
+                log.warning("排程失敗，略過：%s\\%s（%s）",
+                            source.name, entry.name, exc)
+
+    if scheduled == 0:
+        # PerformOperations() 在零排程時會回 0x8000FFFF (E_UNEXPECTED)，
+        # 也就是舊版使用者遇到的 -2147418113「災難性的失敗」。
+        log.warning("沒有任何項目排程成功")
+        report.failed.extend(e.name for _, _, p in jobs for e in p)
+        return report
+
+    log.info("開始複製：%d 個檔案，來自 %d 個資料夾", scheduled, len(jobs))
+    aborted = _perform(pfo)
+
+    # ---- 第 3 段：逐資料夾驗證掃描 ----
+    # 取代 IFileOperationProgressSink（決策 D6）。搭配 FOF_NOERRORUI，
+    # 失敗的檔案不會跳「是否略過」小視窗，改由這裡比對出來，
+    # 使用者才拿得到失敗清單。
+    state.phase = CopyPhase.VERIFYING
+    notify()
+    for source, dest_sub, pending in jobs:
+        landed = _local_index(dest_sub)
+        for entry in pending:
+            if entry.key in landed:
+                report.copied.append(entry.name)
+            else:
+                report.failed.append("{}\\{}".format(source.name, entry.name))
+    state.copied = len(report.copied)
+    state.failed = len(report.failed)
+    report.aborted = aborted
+    notify()
+
+    if aborted:
+        log.info("備份已取消：%s", report.summary())
+    else:
+        log.info("備份完成：%s", report.summary())
     return report
