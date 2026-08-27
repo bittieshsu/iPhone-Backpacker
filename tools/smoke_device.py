@@ -32,7 +32,15 @@ log = logging.getLogger("smoke-device")
 TARGET_MS = 500.0   # 效能契約：互動操作 0.5 秒內要有反應
 
 
-def timed(label, fn, target=None):
+def timed(label, fn, target=None, warmup=False):
+    """warmup=True 會先跑一次不計時。
+
+    ★ MTP 的第一次觸碰要付約 70 ms 的開場成本（開啟列舉 session），
+      不 warm-up 的話「先跑的那個」永遠比較慢，會被誤讀成真實差異。
+      這個坑在本專案已經製造過三次錯誤結論了，做 A/B 一律先 warm-up。
+    """
+    if warmup:
+        fn()
     start = time.perf_counter()
     result = fn()
     ms = (time.perf_counter() - start) * 1000
@@ -60,14 +68,17 @@ def bench_enum_flags(abs_pidl, label):
     folders, ms_folders = timed(
         "SHCONTF_FOLDERS（只要資料夾）",
         lambda: list(shell_ns.iter_entries(abs_pidl, flags=shell_ns.FOLDERS_ONLY)),
+        warmup=True,
     )
     everything, ms_all = timed(
         "FOLDERS|NONFOLDERS（全部）",
         lambda: list(shell_ns.iter_entries(abs_pidl, flags=shell_ns.EVERYTHING)),
+        warmup=True,
     )
     files, ms_files = timed(
         "SHCONTF_NONFOLDERS（只要檔案）",
         lambda: list(shell_ns.iter_entries(abs_pidl, flags=shell_ns.FILES_ONLY)),
+        warmup=True,
     )
 
     log.info("項目數：資料夾 %d / 全部 %d / 檔案 %d",
@@ -198,15 +209,21 @@ def main():
         if candidates:
             log.info("")
             log.info("--- 5. 早退 vs 完整列舉（前 %d 個資料夾） ---", len(candidates))
+            log.info("（每組都先 warm-up，避免「先跑的比較慢」被誤讀）")
             for entry in candidates:
                 _, ms_probe = timed("  early-exit [{}]".format(entry.name[:24]),
                                     lambda e=entry: listing.folder_has_media(
-                                        e.abs_pidl, MEDIA))
+                                        e.abs_pidl, MEDIA),
+                                    warmup=True)
                 files, ms_full = timed("  full       [{}]".format(entry.name[:24]),
                                        lambda e=entry: list(listing.iter_files(
-                                           e.abs_pidl, MEDIA)))
+                                           e.abs_pidl, MEDIA)),
+                                       warmup=True)
                 saved = (1 - ms_probe / ms_full) * 100 if ms_full else 0
                 log.info("  → %d 個檔案，早退省下 %.0f%%", len(files), saved)
+                if len(files) < 20:
+                    log.info("     （只有 %d 個檔案，早退無從發揮，"
+                             "這組數字不具參考價值）", len(files))
 
         # ---- 6. 選配：全裝置掃描 ----
         if args.scan:
