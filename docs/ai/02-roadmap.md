@@ -97,24 +97,34 @@
 
 ---
 
-## 階段 3 — GUI 骨架（先接本機資料夾） ⬜ 未開始
+## 階段 3 + 4 — GUI ✅ 程式碼完成，待 Windows 實測
 
-- [ ] PySide6 主視窗，`QTreeWidget` 樹狀 + checkbox（**資料夾層級**）
-- [ ] 目的地選擇、全選/全不選
-- [ ] `NamespaceCache`：展開過的節點收合再展開是零成本
-- [ ] 右側摘要面板 —— **檔案數/大小背景算，不阻塞勾選與備份**（見 D8）
-- [ ] **先只接本機資料夾**，把互動流程跑順再接 iPhone
+**階段 3 與 4 合併執行。** 原計畫「先接本機資料夾、之後再接 iPhone」在
+決策 D10 之後失去意義 —— 非同步是硬需求，先寫同步版再改寫是白工。
+而且磁碟機與 iPhone 都在「本機」底下同一層，樹只要一個根就同時涵蓋兩者。
 
-**驗證方式**：介面流程確認，使用者實際點過一輪。
+- [x] `ui/workers.py`：單一 worker `QThread`，`CoInitialize` / `CoUninitialize`
+      掛在 `thread.started` / `thread.finished`，任務序列執行
+- [x] `ui/main_window.py`：`QTreeWidget` + checkbox（資料夾層級）
+- [x] 非同步延遲展開 + 「載入中…」骨架節點
+- [x] 裝置狀態橫幅（含「請解鎖 iPhone 並點信任」）
+- [x] 「重新整理裝置」按鈕（清快取 + 重新偵測 + 重列）
+- [x] 全選 / 全不選（作用在目前節點底下，對 184 個資料夾是必需的）
+- [x] 備份類型下拉（照片+影片 / 只照片 / 只影片 / 全部）
+- [x] 目的地選擇、開始備份、完成後顯示失敗清單
+- [x] 檔案數欄位：**400 ms debounce + 背景計算**，點選當下什麼都不算
+- [x] `iphone_backpacker/app.py` 進入點、`run_gui.py` 開發用啟動腳本
+- [ ] **⚠ 待實測**：`pip install PySide6` 後 `python run_gui.py`
 
----
+### 這個階段的設計要點
 
-## 階段 4 — 接上 iPhone + 背景執行緒 ⬜ 未開始
-
-- [ ] `workers.py`：QThread wrapper，`CoInitialize` / `CoUninitialize`
-- [ ] 樹狀延遲展開，列舉在背景執行緒（MTP 幾千張跑 30 秒以上是正常的）
-- [ ] 裝置狀態顯示 + 「請解鎖 iPhone 並點『信任』」提示 ← **投報率最高的單一功能**
-- [ ] 「重新整理裝置」按鈕（MTP 偶爾回傳不完整清單，是 Windows 已知毛病）
+- **啟動不同步等偵測**：視窗先 `show()`，再發 `request_detect` /
+  `request_roots`。使用者看到的是「立刻開啟」而不是「卡兩秒」。
+- **點選節點零成本**：`currentItemChanged` 只重設 debounce 計時器。
+  用方向鍵快速滑過 184 個節點不會塞爆 worker。
+- **勾選語意**：勾一個資料夾＝備份「直接放在它裡面」的檔案，**不含子資料夾**。
+  右側面板有寫明。iPhone 的照片就放在葉節點，這個語意夠用。
+- 開發機是 Linux，**PySide6 裝不起來，只做過語法與 signal/slot 連線檢查**。
 
 ---
 
