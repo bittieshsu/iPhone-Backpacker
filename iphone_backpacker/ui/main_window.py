@@ -400,8 +400,12 @@ class MainWindow(QMainWindow):
                          "它們只是還沒輪到就被取消了。".format(len(report.cancelled)))
         if report.failed:
             lines.append("")
-            lines.append("真正失敗的檔案（共 {} 個）—— Windows 複製不了，"
-                         "多半是檔案本身有問題，重試通常無效：".format(
+            # ★ 實測（2026-08-28）：兩個「複製不了」的檔案重試一次就成功了。
+            #   所以這類失敗多半是 MTP 傳輸的暫時性問題，不是檔案壞掉。
+            #   不要叫使用者放棄，要叫他重試。
+            lines.append("這 {} 個檔案 Windows 這次沒複製成功。\n"
+                         "多半是 USB／MTP 傳輸的暫時性問題，"
+                         "**按「重試未完成的項目」通常就會成功**：".format(
                              len(report.failed)))
             lines.extend("  " + n for n in report.failed[:50])
             if len(report.failed) > 50:
@@ -415,7 +419,7 @@ class MainWindow(QMainWindow):
             title, icon = "備份結束，但有些檔案失敗", QMessageBox.Icon.Warning
         box.setWindowTitle(title)
         box.setIcon(icon)
-        box.setText("\n".join(lines))
+        box.setText("\n".join(lines).replace("**", ""))
 
         # 「重試」不需要特別的機制 —— 增量去重會自動跳過已經複製好的，
         # 所以重跑同一個任務就等於只重試沒完成的那些。
