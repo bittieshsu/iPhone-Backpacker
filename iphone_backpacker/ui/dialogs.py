@@ -19,7 +19,7 @@ _KEY_SEEN_GUIDE = "ui/seen_first_run_guide"
 GUIDE_HTML = """
 <h2>開始之前，先確認 iPhone 的一個設定</h2>
 
-<p>iPhone 上：<b>設定 → App → 相簿 → 傳送到 Mac 或 PC</b>，有兩個選項：</p>
+<p>iPhone 上：<b>設定 → App → 照片 → 傳送到 Mac 或 PC</b>，有兩個選項：</p>
 
 <table cellpadding="6" style="border-collapse:collapse">
   <tr>

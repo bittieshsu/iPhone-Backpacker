@@ -39,7 +39,9 @@
 
 ### 步驟 0：先確認 iPhone 的設定
 
-iPhone 上：**設定 → App → 相簿 → 傳送到 Mac 或 PC**
+iPhone 上：**設定 → App → 照片 → 傳送到 Mac 或 PC**
+
+<img src="docs/img/iPhone_app_setting.jpg" width="320" alt="iPhone 的照片設定畫面">
 
 | 選項 | 你會拿到 | 取捨 |
 |---|---|---|
@@ -123,9 +125,11 @@ iPhone 上：**設定 → App → 相簿 → 傳送到 Mac 或 PC**
 
 **這不是當掉，等下去通常會繼續。** 但如果你要備份影片，建議：
 
-1. iPhone 改成**「保留原始檔」**
+1. iPhone 上 **設定 → App → 照片 → 傳送到 Mac 或 PC**，改成**「保留原始檔」**
 2. **把 USB 線拔掉重插**（不重插設定不會生效）
 3. 重新備份
+
+<img src="docs/img/iPhone_app_setting.jpg" width="320" alt="iPhone 的照片設定畫面">
 
 改完之後傳輸是直接送原始檔，速度會穩定很多。真的需要 JPG 的話，在電腦上轉檔
 比讓手機轉快得多。

@@ -52,7 +52,8 @@ iPhone 接上 Windows 走 **PTP/MTP**，在檔案總管看得到但**沒有磁�
 
 ## 使用者情境備註
 
-使用者在 iPhone 的「設定 → App → 相簿 → 傳送到 Mac 或 PC」有兩種模式，會影響拿到的檔案格式：
+使用者在 iPhone 的「設定 → App → 照片 → 傳送到 Mac 或 PC」有兩種模式，會影響拿到的檔案格式：
+（截圖：`docs/img/iPhone_app_setting.jpg`）
 
 - **自動**：手機端即時轉檔，照片出 `.jpg`、影片出 `.mov`。傳輸明顯較慢。
 - **保留原始檔**：直出 `.heic` / `.heif` / `.mov`。

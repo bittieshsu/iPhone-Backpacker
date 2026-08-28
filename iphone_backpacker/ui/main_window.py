@@ -42,7 +42,7 @@ CATEGORY_CHOICES = [
 ]
 
 HINT_TEXT = (
-    "<b>提示：</b>iPhone 的「設定 → App → 相簿 → 傳送到 Mac 或 PC」有兩種模式，"
+    "<b>提示：</b>iPhone 的「設定 → App → 照片 → 傳送到 Mac 或 PC」有兩種模式，"
     "決定你拿到的是 .jpg／.mov 還是 .heic／.mov。"
     "<b>改完設定要把 USB 線拔掉重插才會生效。</b>"
     "　詳情請按右上角的「使用說明」。"
