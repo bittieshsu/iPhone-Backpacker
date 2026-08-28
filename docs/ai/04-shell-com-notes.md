@@ -397,6 +397,24 @@ v3 已改為以「回傳 0 項的旗標仍耗時」為主要判準。）
 目的地是慢速隨身碟時特別明顯）。這段期間 worker 執行緒被卡住，
 無法中斷 —— COM 呼叫沒有取消機制。UI 要把這件事講清楚。
 
+## 開發機是 Linux、目標是 Windows 的坑
+
+### `.bat` 一定要 CRLF + 純 ASCII
+
+在 Linux 寫出來的 `.bat` 預設是 LF 換行，而 `cmd.exe` 需要 CRLF。
+症狀是**每行的第一個字元被吃掉**：
+
+```
+'equirements.txt' 不是內部或外部命令      ← 少了開頭的 r
+'cho.' 不是內部或外部命令                  ← 少了開頭的 e
+```
+
+再加上 `cmd.exe` 用系統 OEM codepage（繁中是 950）讀檔，
+UTF-8 的中文註解會變成亂碼。
+
+**解法**：把邏輯放在 `.py`（UTF-8 沒問題），`.bat` 只留一行純 ASCII 的轉呼叫。
+另外加 `.gitattributes` 的 `*.bat text eol=crlf` 強制換行字元。
+
 ## 打包相關的坑
 
 - **PyInstaller `--windowed` 後 `sys.stdout` / `sys.stderr` 是 `None`**，

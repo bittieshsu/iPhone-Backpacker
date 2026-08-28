@@ -55,19 +55,16 @@ EXCLUDES = [
     "PySide6.QtBluetooth",
     "PySide6.QtPositioning",
     "PySide6.QtSerialPort",
-    # 標準庫裡完全用不到的大塊
+    # 明確用不到、且排除後不會影響其他套件的
     "tkinter",
-    "unittest",
-    "pydoc",
-    "doctest",
-    "email",
-    "http",
-    "xml",
-    # 常見的誤收
     "numpy",
     "PIL",
     "matplotlib",
 ]
+
+# 刻意**不**排除 email / http / xml / unittest / pydoc 這類標準庫模組。
+# 它們體積不大，卻常被其他套件間接 import，排掉的風險遠大於收益。
+# 真的很在意體積再回頭試，一次加一個並實測。
 
 a = Analysis(
     ["run_gui.py"],

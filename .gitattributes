@@ -1,0 +1,9 @@
+# 開發機是 Linux、目標是 Windows，換行字元必須明確指定。
+# .bat 用 LF 會讓 cmd.exe 吃掉每行的第一個字元。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf

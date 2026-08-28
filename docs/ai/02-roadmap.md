@@ -188,6 +188,8 @@
 - [x] 改寫 README：平台改標 Windows 10/11、SmartScreen 與防毒誤判的說明、
       log 檔位置、打包方式
 - [x] 移除舊的 `iphoneCopyOneFolder.py` / `iphoneCopyByConfig.py` / `EditThis.txt`
+- [x] 修正 `.bat` 的 LF／編碼問題 —— 邏輯移到 `tools/build.py`，
+      `build.bat` 只剩一行純 ASCII 轉呼叫，並加上 `.gitattributes`
 - [ ] **⚠ 待實測**：`build.bat` 能不能成功打包
 - [ ] **⚠ 待實測**：打包後的 exe 能不能正常瀏覽與備份
 - [ ] **⚠ 待量測**：打包後的啟動時間（開發模式是 import 2.3 秒 + 初始化 0.1 秒）
