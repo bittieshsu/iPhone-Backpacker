@@ -190,9 +190,15 @@
 - [x] 移除舊的 `iphoneCopyOneFolder.py` / `iphoneCopyByConfig.py` / `EditThis.txt`
 - [x] 修正 `.bat` 的 LF／編碼問題 —— 邏輯移到 `tools/build.py`，
       `build.bat` 只剩一行純 ASCII 轉呼叫，並加上 `.gitattributes`
-- [ ] **⚠ 待實測**：`build.bat` 能不能成功打包
-- [ ] **⚠ 待實測**：打包後的 exe 能不能正常瀏覽與備份
-- [ ] **⚠ 待量測**：打包後的啟動時間（開發模式是 import 2.3 秒 + 初始化 0.1 秒）
+- [x] **實測通過**（2026-08-28，PyInstaller 6.3.0 / Python 3.12.10）：
+      打包成功，產物 113 MB，exe 可正常瀏覽、批次計算、備份、取消、重試。
+      單次備份 6626 個檔案成功。
+- [x] 打包後啟動：`import 1013 ms`（開發模式是 2279 ms，快了一倍以上）。
+      「我們的初始化」那個數字在**首次**啟動時會很大（實測 33 秒），
+      那是 Windows 第一次把 `_internal` 裡的 DLL 讀進檔案快取的成本；
+      第二次啟動降到 4.4 秒。屬於冷啟動的正常現象。
+- [x] `docs/BUILD.md`（自行打包）、`docs/OFFLINE-INSTALL.md`（離線安裝）
+- [x] README 加上六張操作截圖與「複製速度 0 位元組」的說明
 
 ### 打包後最可能出問題的地方
 

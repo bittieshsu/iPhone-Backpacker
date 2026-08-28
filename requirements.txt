@@ -1,6 +1,9 @@
 # 目標環境：Windows 10 / 11 + Python 3.12
 # （已明確放棄 Windows 7 —— Qt6 不支援，且 Python 3.8 是最後一版支援 Win7 的。
 #   見 docs/ai/03-decisions.md 的 D2）
+#
+# 以下是 v1.0.0 實際驗證過的版本組合。
+# 沒有網路的話請看 docs/OFFLINE-INSTALL.md。
 
-pywin32>=306
-PySide6>=6.6        # 階段 3 才會用到
+pywin32==306
+PySide6==6.7.3
