@@ -20,7 +20,7 @@ import threading
 import pythoncom
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..core import copier, device, listing, shell_ns
+from ..core import copier, device, diagnostics, listing, shell_ns
 from ..core.errors import BackpackerError
 
 log = logging.getLogger(__name__)
@@ -41,6 +41,11 @@ class ShellWorker(QObject):
     file_count_ready = Signal(object, int)          # folder_pidl, count
     file_count_failed = Signal(object, str)         # folder_pidl, 錯誤訊息
     count_batch_progress = Signal(int, int)         # 已完成, 總數
+
+    # 診斷報告
+    report_progress = Signal(str)                   # 目前在跑哪一段
+    report_ready = Signal(str)                      # 報告檔的完整路徑
+    report_failed = Signal(str)
 
     # 複製
     copy_progress = Signal(object)                  # CopyProgress
@@ -181,6 +186,29 @@ class ShellWorker(QObject):
             self.copy_failed.emit(str(exc))
             return
         self.copy_finished.emit(report)
+
+    @Slot(object)
+    def build_report(self, focus_folder):
+        """產生診斷報告並存成 .txt。
+
+        ★ 這件事一定要在 worker 執行緒做 —— 它要碰 Shell COM，
+          而且會跑好幾秒（要列舉「本機」與裝置的資料夾）。
+
+        focus_folder 是使用者目前選取的資料夾，可以是 None。
+        """
+        try:
+            text = diagnostics.collect_report(
+                focus_folder=focus_folder,
+                progress=self.report_progress.emit,
+            )
+            path = diagnostics.write_report(text)
+        except Exception as exc:   # noqa: BLE001
+            # 診斷報告是「出問題的時候」用的，所以它自己絕對不能因為
+            # 未預期的例外而失敗得無聲無息。這裡刻意攔下所有例外。
+            log.exception("產生診斷報告失敗")
+            self.report_failed.emit(str(exc))
+            return
+        self.report_ready.emit(str(path))
 
     @Slot()
     def clear_cache(self):

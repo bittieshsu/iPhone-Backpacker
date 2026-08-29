@@ -13,11 +13,13 @@
 import logging
 import re
 import time
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter,
+    QApplication, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter,
     QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -70,6 +72,7 @@ class MainWindow(QMainWindow):
     request_count_batch = Signal(object, object)
     request_copy = Signal(object, str, object, int)
     request_clear_cache = Signal()
+    request_report = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -159,6 +162,18 @@ class MainWindow(QMainWindow):
         self.btn_help = QPushButton("使用說明")
         self.btn_help.clicked.connect(lambda: dialogs.show_guide(self))
         bar.addWidget(self.btn_help)
+
+        # ★ 會遇到問題的人，正是最不可能開終端機跑診斷腳本的人。
+        #   所以診斷必須是 GUI 上的一顆按鈕，而且產物要是他們找得到、
+        #   打得開、傳得出去的 .txt 檔（存到桌面）。
+        self.btn_report = QPushButton("產生診斷報告")
+        self.btn_report.setToolTip(
+            "遇到問題時按這個，會在桌面產生一個 .txt 檔，\n"
+            "把它傳給開發者就能幫忙診斷。\n\n"
+            "如果某個資料夾的檔案數看起來不對，\n"
+            "先在左邊點選那個資料夾再按，報告會多做一段逐項檢查。")
+        self.btn_report.clicked.connect(self._on_build_report)
+        bar.addWidget(self.btn_report)
 
         # ★ 這兩顆按鈕的作用範圍不是「整棵樹」，而是「目前選取節點的底下」。
         #   使用者回報「全不選」讓人以為會清掉所有勾選，需要明確說明。
@@ -527,6 +542,54 @@ class MainWindow(QMainWindow):
         self.request_count_batch.emit(
             [i.data(0, PIDL_ROLE) for i in targets], self._categories)
 
+    def _on_build_report(self):
+        current = self.tree.currentItem()
+        focus = current.data(0, ENTRY_ROLE) if current is not None else None
+        self.btn_report.setEnabled(False)
+        self.btn_report.setText("產生中…")
+        self.statusBar().showMessage("正在收集診斷資料…")
+        self.request_report.emit(focus)
+
+    def on_report_progress(self, heading):
+        self.statusBar().showMessage("正在收集診斷資料… {}".format(heading))
+
+    def on_report_ready(self, path):
+        self._reset_report_button()
+        self.statusBar().showMessage("診斷報告已產生", 8000)
+
+        folder = str(Path(path).parent)
+        box = QMessageBox(self)
+        box.setWindowTitle("診斷報告已產生")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            "報告已存到：\n\n{}\n\n"
+            "把這個檔案傳給開發者就可以了。\n"
+            "它裡面只有裝置與資料夾的名稱、以及程式的執行紀錄，"
+            "不包含你的照片。".format(path))
+        open_button = box.addButton("開啟資料夾", QMessageBox.ButtonRole.ActionRole)
+        copy_button = box.addButton("複製檔案路徑", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("關閉", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is open_button:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        elif clicked is copy_button:
+            QApplication.clipboard().setText(path)
+            self.statusBar().showMessage("路徑已複製", 4000)
+
+    def on_report_failed(self, message):
+        self._reset_report_button()
+        QMessageBox.warning(
+            self, "診斷報告產生失敗",
+            "產生報告時發生錯誤：\n\n{}\n\n"
+            "請改為附上這個檔案：\n"
+            "%LOCALAPPDATA%\\iPhoneBackpacker\\logs\\backpacker.log".format(message))
+
+    def _reset_report_button(self):
+        self.btn_report.setEnabled(True)
+        self.btn_report.setText("產生診斷報告")
+
     def _on_stop_count(self):
         if self._cancel_count is not None:
             self._cancel_count()
@@ -596,7 +659,7 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0 if busy else 1)
         for widget in (self.btn_start, self.btn_refresh, self.btn_dest,
                        self.btn_check_all, self.btn_uncheck_all,
-                       self.btn_count, self.combo_category):
+                       self.btn_count, self.btn_report, self.combo_category):
             widget.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
         if busy:
