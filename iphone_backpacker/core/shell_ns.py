@@ -14,6 +14,7 @@
 
 import contextlib
 import logging
+import re
 
 import pythoncom
 from win32com.shell import shell, shellcon
@@ -161,6 +162,7 @@ def _enum_pidls(folder, flags, batch=DEFAULT_BATCH):
     if enumerator is None:          # 空資料夾在某些 shell extension 上會回 None
         return
 
+    seen = 0
     while True:
         try:
             chunk = enumerator.Next(batch)
@@ -168,13 +170,26 @@ def _enum_pidls(folder, flags, batch=DEFAULT_BATCH):
             batch = None
             chunk = enumerator.Next()
         except pythoncom.com_error as exc:
-            log.warning("列舉中斷（MTP 偶發，建議重新插拔）：%s", exc)
-            return
+            # ★★ 這裡以前是 log.warning 之後直接 return，也就是**靜默截斷清單**。
+            #   對備份工具來說那是最糟的失敗方式：iter_files() 被截斷後，
+            #   copier 會判定「待複製 0 個」而**靜默跳過整個資料夾不備份**，
+            #   使用者卻以為備份完成了。
+            #   MTP 偶發性失敗是真的存在，所以先重試一次，仍然失敗就 raise，
+            #   讓使用者看到錯誤並按「重新整理裝置」，而不是拿到不完整的資料。
+            log.warning("列舉中斷（已取得 %d 項）：%s —— 重試一次", seen, exc)
+            try:
+                chunk = enumerator.Next(batch)
+            except pythoncom.com_error as exc2:
+                raise ShellError(
+                    "列舉中斷，清單不完整（已取得 {} 項）：{}。"
+                    "請按「重新整理裝置」，或把 USB 線拔掉重插。".format(seen, exc2)
+                ) from exc2
         if not chunk:
             return
         if not isinstance(chunk, (list, tuple)):
             chunk = [chunk]
         for rel_pidl in chunk:
+            seen += 1
             yield rel_pidl
 
 
@@ -201,9 +216,18 @@ def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False,
     for rel_pidl in _enum_pidls(folder, flags, batch):
         try:
             name = folder.GetDisplayNameOf(rel_pidl, shellcon.SHGDN_NORMAL)
-        except pythoncom.com_error as exc:
-            log.warning("取得顯示名稱失敗，略過一個項目：%s", exc)
-            continue
+        except pythoncom.com_error:
+            # ★ 這裡以前是 log.warning + continue，等於**靜默漏掉一個項目**。
+            #   漏掉一個資料夾 → 使用者看不到也就備份不到；
+            #   漏掉一個檔案 → 那個檔案不會被複製。兩種都不能默默發生。
+            #   先重試一次（MTP 偶發），仍然失敗就 raise。
+            try:
+                name = folder.GetDisplayNameOf(rel_pidl, shellcon.SHGDN_NORMAL)
+            except pythoncom.com_error as exc2:
+                raise ShellError(
+                    "有項目讀不到名稱，清單不完整：{}。"
+                    "請按「重新整理裝置」，或把 USB 線拔掉重插。".format(exc2)
+                ) from exc2
         attributes = None
         if want_attributes:
             attributes = attributes_of(folder, rel_pidl)
@@ -224,8 +248,32 @@ def attributes_of(folder, rel_pidl, mask=None):
     try:
         return folder.GetAttributesOf([rel_pidl], mask)
     except pythoncom.com_error as exc:
-        log.warning("取得屬性失敗：%s", exc)
-        return 0
+        # ★ 回 None（未知）而不是 0（全部旗標都沒有）。
+        #   回 0 會讓呼叫端誤判成「不是資料夾、不是檔案系統」，
+        #   裝置偵測就會把這個節點整個排除掉。
+        log.warning("取得屬性失敗，視為未知：%s", exc)
+        return None
+
+
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:([\\/]|$)")
+
+
+def looks_like_filesystem_path(name):
+    """解析名稱看起來是不是真實檔案系統路徑。
+
+    磁碟機與使用者資料夾的 SHGDN_FORPARSING 會回 `C:\\` 或
+    `C:\\Users\\某人\\Desktop` 這種路徑；
+    MTP 裝置則是 `::{GUID}\\\\?\\usb#vid_05ac...` 那種東西。
+
+    這個判斷不看顯示名稱，所以使用者把 iPhone 改成什麼名字都不受影響。
+    """
+    if not name:
+        return False
+    if _DRIVE_PATH.match(name):
+        return True
+    if name.startswith("\\\\"):       # UNC 網路路徑
+        return True
+    return False
 
 
 def find_child(abs_pidl, name, flags=EVERYTHING):

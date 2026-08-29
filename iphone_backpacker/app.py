@@ -39,6 +39,7 @@ def _connect(window, worker):
     worker.subfolders_ready.connect(window.on_subfolders_ready)
     worker.subfolders_failed.connect(window.on_subfolders_failed)
     worker.file_count_ready.connect(window.on_file_count_ready)
+    worker.file_count_failed.connect(window.on_file_count_failed)
     worker.count_batch_progress.connect(window.on_count_batch_progress)
     worker.copy_progress.connect(window.on_copy_progress)
     worker.copy_finished.connect(window.on_copy_finished)

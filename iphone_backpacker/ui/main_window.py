@@ -384,6 +384,19 @@ class MainWindow(QMainWindow):
             item.setText(1, str(count))
         self._update_detail()
 
+    def on_file_count_failed(self, pidl, message):
+        """讀不到就顯示「讀取失敗」，不要顯示 0。
+
+        顯示 0 會讓使用者以為資料夾是空的而不去備份它，
+        但實際上是我們沒讀到 —— 那是最糟的誤導。
+        刻意不寫進 _file_counts，這樣再點一次或按「計算檔案數」就會重試。
+        """
+        item = self._find_item(pidl)
+        if item is not None:
+            item.setText(1, "讀取失敗")
+            item.setToolTip(1, "{}\n\n再按一次「計算檔案數」可以重試。".format(message))
+        self.statusBar().showMessage("有資料夾讀取失敗，可以重試", 6000)
+
     def on_copy_progress(self, state):
         labels = {
             CopyPhase.LISTING: "讀取檔案清單",

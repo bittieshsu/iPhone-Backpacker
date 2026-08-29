@@ -398,6 +398,66 @@ Shell 跟 iPhone 要一個檔案時，手機必須先把整個檔案轉完才有
 
 已寫進：`ui/dialogs.py` 的首次啟動引導、README 的「常見狀況」。
 
+## ★★ 靜默失敗是這個專案最危險的失敗方式
+
+2026-08-29 的災情回報揭露了兩條**會讓資料悄悄消失**的路徑，
+兩條都在 `shell_ns.py`，原本都只有 `log.warning` 然後繼續：
+
+```python
+# ① 列舉中途失敗 → 直接 return，清單被截斷
+except pythoncom.com_error as exc:
+    log.warning("列舉中斷（MTP 偶發，建議重新插拔）：%s", exc)
+    return
+
+# ② 取不到顯示名稱 → 跳過這個項目
+except pythoncom.com_error as exc:
+    log.warning("取得顯示名稱失敗，略過一個項目：%s", exc)
+    continue
+```
+
+**為什麼這對備份工具特別致命**：
+
+- `iter_files()` 被截斷 → `copier` 判定「待複製 0 個」→ **靜默跳過整個資料夾不備份**。
+  使用者看到「備份完成」，實際上那個資料夾一個檔案都沒複製。
+- `list_subfolders()` 漏掉項目 → 使用者根本看不到那個資料夾，
+  自然也不會勾選它。
+
+**兩條都改成「重試一次，仍然失敗就 raise `ShellError`」。**
+MTP 偶發性失敗是真的存在，但「拿到不完整的資料卻不知道」比「看到錯誤訊息」糟得多。
+
+**同一個原則的延伸**：`attributes_of()` 失敗時改回 `None`（未知）而不是 `0`。
+回 `0` 會讓呼叫端讀成「不是資料夾、不是檔案系統」，裝置偵測就把整個節點排除掉。
+
+**UI 層對應**：檔案數讀不到時顯示「讀取失敗」而**不是 0**。
+顯示 0 會讓使用者以為資料夾是空的而不去備份它。
+
+## 裝置偵測不能只靠單一訊號
+
+災情：使用者把 iPhone 改名成「阿神ㄟ@iPhone」（含 `@` 與注音），
+程式顯示「沒有偵測到 iPhone」，**但樹狀瀏覽卻能正常展開到 Internal Storage**。
+
+**根因是兩條路走不同判斷**：
+
+| 路徑 | 判斷 |
+|---|---|
+| 樹狀瀏覽 `list_subfolders()` | 只做列舉，**不看屬性** → 看得到 |
+| 裝置偵測 `find_portable_devices()` | 要求 `SFGAO_FOLDER && !SFGAO_FILESYSTEM` → 漏掉 |
+
+改成多重訊號，順序由可靠到次要：
+
+1. 解析名稱像 `C:\` 或 UNC → 磁碟機／使用者資料夾，排除
+2. **取不到解析名稱 → 視為裝置候選**（實測 iPhone 就是這樣，
+   `SHBindToParent` 對 MTP 根節點會失敗；磁碟機則一定拿得到）
+3. 兩者都不成立 → 回頭看 `SFGAO_FILESYSTEM`
+4. 屬性也讀不到 → **寧可放行**
+
+**偵測不到任何裝置時，把「本機」底下每個節點的
+`名稱 / attrs / parsing / 判定依據` 全部 dump 到 log**，
+下次收到回報就有資料可查，不用再靠猜。
+
+判斷邏輯有純 Python 的單元測試（`tests/test_device_classify.py`），
+在 Linux 上就能跑。
+
 ## `IFileOperation` 的錯誤碼
 
 | HRESULT | 十進位 | 意義 | 怎麼處理 |

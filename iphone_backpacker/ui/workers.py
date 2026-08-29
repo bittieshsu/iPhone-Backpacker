@@ -39,6 +39,7 @@ class ShellWorker(QObject):
 
     # 資料夾摘要（背景算，永不阻塞選取）
     file_count_ready = Signal(object, int)          # folder_pidl, count
+    file_count_failed = Signal(object, str)         # folder_pidl, 錯誤訊息
     count_batch_progress = Signal(int, int)         # 已完成, 總數
 
     # 複製
@@ -151,10 +152,17 @@ class ShellWorker(QObject):
             log.info("批次計算完成")
 
     def _count_one(self, folder_pidl, categories):
+        """算一個資料夾的檔案數。讀不到時回 None 並發出 file_count_failed。
+
+        ★ 讀取失敗**絕對不能顯示成 0**。使用者看到 0 會以為那個資料夾是空的，
+          於是不去備份它 —— 但實際上是我們沒讀到。這正是災情回報裡
+          「最新的 202608_a 顯示 0 個檔案」的可疑之處。
+        """
         try:
             return sum(1 for _ in listing.iter_files(folder_pidl, categories))
         except BackpackerError as exc:
-            log.debug("計算檔案數失敗：%s", exc)
+            log.warning("計算檔案數失敗：%s", exc)
+            self.file_count_failed.emit(folder_pidl, str(exc))
             return None
 
     @Slot(object, str, object, int)

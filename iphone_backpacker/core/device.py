@@ -83,32 +83,83 @@ def status_message(status, device_name=None):
 def find_portable_devices():
     """列出「本機」底下所有可攜式裝置。
 
-    回傳空 list 表示沒插、或 Windows 還沒認到（不是錯誤，交給呼叫端判斷）。
+    ★★ 判斷依據刻意用**多重訊號**，因為單一訊號實測會漏掉裝置。
+      有使用者把 iPhone 改名成「阿神ㄟ@iPhone」後，程式顯示「沒有偵測到
+      iPhone」，但樹狀瀏覽卻能正常展開到 Internal Storage ——
+      也就是**樹能用、偵測卻失敗**。原因是兩條路走不同的判斷：
+      樹只做列舉，偵測卻要求 `SFGAO_FOLDER && !SFGAO_FILESYSTEM`。
+
+      現在的判斷順序（由可靠到次要）：
+
+      1. 解析名稱看起來是 `C:\` 或 UNC → 磁碟機／使用者資料夾，排除
+      2. **取不到解析名稱 → 視為裝置候選**。實測 iPhone 就是這種情況
+         （`SHBindToParent` 對 MTP 根節點會失敗），而磁碟機一定拿得到
+      3. 前兩者都不成立 → 回頭看 `SFGAO_FILESYSTEM`
+      4. 屬性也讀不到（None）→ 寧可放行，讓使用者自己判斷
+
+      **絕對不要比對顯示名稱。** 使用者可以把手機改成任何名字，
+      也可能用英文／日文版 Windows。
+
+    回傳空 list 時會把「本機」底下每個節點的判斷依據 dump 到 log，
+    這樣下次收到災情回報就有資料可查，不用再靠猜的。
     """
     this_pc = shell_ns.this_pc_pidl()
     devices: List[Device] = []
+    diagnostics = []
 
     for child_abs, name, attrs in shell_ns.iter_entries(
         this_pc, flags=shell_ns.EVERYTHING, want_attributes=True
     ):
-        is_folder = bool(attrs & shellcon.SFGAO_FOLDER)
-        is_filesystem = bool(attrs & shellcon.SFGAO_FILESYSTEM)
-        if not is_folder or is_filesystem:
-            continue        # 磁碟機與使用者資料夾都是 FILESYSTEM，排除
-
         try:
             parsing = shell_ns.parsing_name(child_abs)
         except Exception as exc:   # noqa: BLE001 - 診斷用，取不到不該影響偵測
-            # 實測 iPhone 這裡會失敗（SHBindToParent 對 MTP 根節點不見得可用）。
-            # 我們不靠 parsing name 做判斷，純粹是診斷資訊，失敗就算了。
             log.debug("取不到解析名稱（%s）：%s", name, exc)
             parsing = ""
 
-        entry = FileEntry(name=name, is_dir=True, abs_pidl=child_abs)
-        devices.append(Device(entry=entry, parsing_name=parsing))
-        log.info("偵測到可攜式裝置：%s（%s）", name, parsing or "無解析名稱")
+        verdict, reason = _classify(parsing, attrs)
+        diagnostics.append((name, parsing, attrs, verdict, reason))
+
+        if verdict:
+            entry = FileEntry(name=name, is_dir=True, abs_pidl=child_abs)
+            devices.append(Device(entry=entry, parsing_name=parsing))
+            log.info("偵測到可攜式裝置：%s（依據：%s）", name, reason)
+
+    if not devices:
+        log.warning("沒有偵測到可攜式裝置。「本機」底下的節點與判斷依據：")
+        for name, parsing, attrs, verdict, reason in diagnostics:
+            log.warning("    %-24s attrs=%s parsing=%s → %s（%s）",
+                        name,
+                        "None" if attrs is None else "0x{:08X}".format(attrs),
+                        parsing or "（取不到）",
+                        "裝置" if verdict else "排除", reason)
 
     return devices
+
+
+def _classify(parsing, attrs):
+    """判斷一個「本機」底下的節點是不是可攜式裝置。
+
+    回傳 (是不是裝置, 判斷依據的文字說明)。文字會寫進 log，
+    收到災情回報時才知道是哪一條規則做的決定。
+    """
+    if shell_ns.looks_like_filesystem_path(parsing):
+        return False, "解析名稱是檔案系統路徑"
+
+    if not parsing:
+        # 磁碟機與使用者資料夾一定取得到解析名稱，取不到反而是裝置的特徵。
+        if attrs is not None and not (attrs & shellcon.SFGAO_FOLDER):
+            return False, "沒有解析名稱，但也不是資料夾節點"
+        return True, "取不到解析名稱（MTP 裝置的典型特徵）"
+
+    if attrs is None:
+        # 屬性讀不到就寧可放行 —— 少偵測到裝置的代價比誤判大得多。
+        return True, "解析名稱不是檔案系統路徑，屬性讀不到，從寬認定"
+
+    if attrs & shellcon.SFGAO_FILESYSTEM:
+        return False, "SFGAO_FILESYSTEM 已設定"
+    if not (attrs & shellcon.SFGAO_FOLDER):
+        return False, "不是資料夾節點"
+    return True, "SFGAO_FOLDER 且非 FILESYSTEM"
 
 
 def probe(device):
