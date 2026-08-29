@@ -96,22 +96,40 @@ def _describe_this_pc(report):
     report.say()
 
     this_pc = shell_ns.this_pc_pidl()
-    for child_abs, name, attrs in shell_ns.iter_entries(
-        this_pc, flags=shell_ns.EVERYTHING, want_attributes=True
+    for _child_abs, name, attrs, parsing in shell_ns.iter_entries(
+        this_pc, flags=shell_ns.EVERYTHING,
+        want_attributes=True, want_parsing=True,
     ):
-        try:
-            parsing = shell_ns.parsing_name(child_abs)
-            parsing_failed = False
-        except Exception as exc:   # noqa: BLE001
-            parsing, parsing_failed = "（取不到：{}）".format(exc), True
-
-        verdict, reason = device._classify("" if parsing_failed else parsing, attrs)
+        verdict, reason = device._classify(parsing, attrs)
         report.say("  {}".format(name))
         report.say("      attrs   = {}".format(
             "None（讀不到）" if attrs is None else "0x{:08X}".format(attrs)))
-        report.say("      parsing = {}".format(parsing or "（空字串）"))
+        report.say("      parsing = {}".format(
+            "None（讀不到）" if parsing is None else (parsing or "（空字串）")))
         report.say("      判定    = {}（{}）".format(
             "★ 是裝置" if verdict else "不是裝置", reason))
+
+
+def _describe_api(report):
+    """檢查我們依賴的 Shell API 是不是真的存在。
+
+    ★ 這一段是被慘痛教訓逼出來的：`shell.SHBindToParent` 在 pywin32 裡
+      根本不存在，於是取解析名稱**每次都失敗**，而那個失敗被誤讀成
+      「MTP 裝置的特徵」，導致「本機」底下每個節點都被判成 iPhone。
+      主動檢查一遍，這類錯誤就不會再偽裝成裝置行為。
+    """
+    missing = []
+    for label, present, required in shell_ns.api_report():
+        report.say("  {:<44} {}{}".format(
+            label, "有" if present else "沒有", "" if required else "（選配）"))
+        if required and not present:
+            missing.append(label)
+    report.say()
+    if missing:
+        report.say("!! 缺少必要的 Shell API：{}".format("、".join(missing)))
+        report.say("!! 這幾乎一定是問題的根源，請務必回報。")
+    else:
+        report.say("必要的 API 都在。")
 
 
 def _describe_device(report):
@@ -251,6 +269,7 @@ def collect_report(focus_folder=None, progress=None):
 
     report.title("iPhone Backpacker 診斷報告")
     report.section("執行環境", lambda: _describe_environment(report))
+    report.section("零、Shell API 檢查", lambda: _describe_api(report))
     report.section("一、「本機」底下有什麼", lambda: _describe_this_pc(report))
 
     dev_holder = {}

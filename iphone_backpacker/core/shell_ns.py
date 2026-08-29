@@ -206,11 +206,15 @@ def iter_child_pidls(abs_pidl, flags=EVERYTHING, batch=DEFAULT_BATCH):
 
 
 def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False,
-                 batch=DEFAULT_BATCH):
+                 want_parsing=False, batch=DEFAULT_BATCH):
     """列舉一層，yield (child_abs_pidl, name, attributes)。
 
     want_attributes=False 時 attributes 為 None。
     取屬性要多一次 COM 呼叫，非必要不取（MTP 上每一次來回都是成本）。
+
+    want_parsing=True 時改 yield (child_abs_pidl, name, attributes, parsing)，
+    parsing 取不到時是 None（**不是空字串** —— 「取不到」和「空的」
+    必須分得出來，否則呼叫端會拿未知當成證據）。
     """
     folder = bind_folder(abs_pidl)
     for rel_pidl in _enum_pidls(folder, flags, batch):
@@ -231,7 +235,18 @@ def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False,
         attributes = None
         if want_attributes:
             attributes = attributes_of(folder, rel_pidl)
-        yield combine(abs_pidl, rel_pidl), name, attributes
+
+        if not want_parsing:
+            yield combine(abs_pidl, rel_pidl), name, attributes
+            continue
+
+        # 用同一個已繫結的 folder 取解析名稱，不必再 bind 一次。
+        try:
+            parsing = child_parsing_name(folder, rel_pidl)
+        except Exception as exc:      # noqa: BLE001
+            log.debug("取不到「%s」的解析名稱：%s", name, exc)
+            parsing = None
+        yield combine(abs_pidl, rel_pidl), name, attributes, parsing
 
 
 def attributes_of(folder, rel_pidl, mask=None):
@@ -289,26 +304,114 @@ def find_child(abs_pidl, name, flags=EVERYTHING):
 
 
 def display_name(abs_pidl):
-    """取得單一節點的顯示名稱。"""
+    """取得單一節點的顯示名稱。
+
+    ★ 這裡本來也是用 `shell.SHBindToParent`，而那個函式在 pywin32 裡不存在
+      （見 `parsing_name` 的說明）。因為呼叫端用 `except Exception` 包住，
+      失敗會靜靜地變成名稱「?」，所以一直沒被發現。
+
+      改用桌面資料夾把絕對 PIDL 當成相對 PIDL —— 跟 `parsing_name` 同一招。
+    """
     try:
-        parent_folder, rel_pidl = shell.SHBindToParent(
-            list(abs_pidl), shell.IID_IShellFolder, None
-        )
-        return parent_folder.GetDisplayNameOf(rel_pidl, shellcon.SHGDN_NORMAL)
-    except pythoncom.com_error as exc:
+        return desktop_folder().GetDisplayNameOf(
+            list(abs_pidl), shellcon.SHGDN_NORMAL)
+    except Exception as exc:      # noqa: BLE001
         raise ShellError("無法取得顯示名稱：{}".format(exc)) from exc
 
 
-def parsing_name(abs_pidl):
-    """取得解析用名稱（SHGDN_FORPARSING）。
+def child_parsing_name(folder, rel_pidl):
+    """用已經繫結好的父資料夾取得子項的解析名稱。
 
-    磁碟機會回 "C:\\" 這種真實路徑，MTP 裝置會回 "::{GUID}\\\\?\\usb#..." 這種東西。
-    可以當作 SFGAO_FILESYSTEM 之外的第二道判斷依據。
+    ★ 這是最可靠的作法：`GetDisplayNameOf` 我們本來就在用（取顯示名稱），
+      只是換一個旗標。不需要任何額外的 API。
     """
+    return folder.GetDisplayNameOf(rel_pidl, shellcon.SHGDN_FORPARSING)
+
+
+def parsing_name(abs_pidl):
+    """由絕對 PIDL 取得解析名稱。
+
+    ★★ 這裡曾經寫成 `shell.SHBindToParent(...)`，而**那個函式在 pywin32
+      裡根本不存在**。結果是每一次呼叫都拋 AttributeError，
+      而呼叫端把「取不到」誤讀成「MTP 裝置的特徵」，
+      進而把「本機」底下的每一個節點都判定成 iPhone。
+
+      教訓有兩個，都寫在這裡免得再犯：
+
+      1. **不要假設某個 API 存在。** 用 `getattr` 檢查，或用我們已經
+         驗證過能動的東西（這裡就是 `GetDisplayNameOf`）。
+      2. **「取不到資訊」永遠不能當成正面證據。** 那只代表我們不知道。
+
+    依序嘗試幾種作法，全部失敗才 raise。
+    """
+    attempts = []
+
+    # 1. 桌面資料夾會把絕對 PIDL 當成相對於自己的 PIDL —— 這是標準用法，
+    #    而且只用到我們已經確定能動的 GetDisplayNameOf。
     try:
-        parent_folder, rel_pidl = shell.SHBindToParent(
-            list(abs_pidl), shell.IID_IShellFolder, None
-        )
-        return parent_folder.GetDisplayNameOf(rel_pidl, shellcon.SHGDN_FORPARSING)
-    except pythoncom.com_error as exc:
-        raise ShellError("無法取得解析名稱：{}".format(exc)) from exc
+        return desktop_folder().GetDisplayNameOf(
+            list(abs_pidl), shellcon.SHGDN_FORPARSING)
+    except Exception as exc:      # noqa: BLE001
+        attempts.append("desktop.GetDisplayNameOf：{}".format(exc))
+
+    # 2. 較新的 API，pywin32 不一定有，所以先檢查存不存在。
+    getter = getattr(shell, "SHGetNameFromIDList", None)
+    sigdn = getattr(shellcon, "SIGDN_DESKTOPABSOLUTEPARSING", None)
+    if getter is not None and sigdn is not None:
+        try:
+            return getter(list(abs_pidl), sigdn)
+        except Exception as exc:  # noqa: BLE001
+            attempts.append("SHGetNameFromIDList：{}".format(exc))
+    else:
+        attempts.append("SHGetNameFromIDList：這個 pywin32 沒有這個函式")
+
+    # 3. 只對真實檔案系統有效，但那剛好就是我們要排除的東西。
+    try:
+        return shell.SHGetPathFromIDList(list(abs_pidl)) or ""
+    except Exception as exc:      # noqa: BLE001
+        attempts.append("SHGetPathFromIDList：{}".format(exc))
+
+    raise ShellError("取不到解析名稱（都試過了）：{}".format("；".join(attempts)))
+
+
+# 我們實際依賴的 Shell API。啟動時檢查一遍並寫進 log 與診斷報告 ——
+# 「某個 API 其實不存在」這種錯誤，如果沒有主動檢查就會偽裝成裝置行為。
+_REQUIRED_APIS = [
+    ("shell.SHGetDesktopFolder", shell, "SHGetDesktopFolder"),
+    ("shell.SHGetSpecialFolderLocation", shell, "SHGetSpecialFolderLocation"),
+    ("shell.SHCreateItemFromIDList", shell, "SHCreateItemFromIDList"),
+    ("shell.SHCreateItemFromParsingName", shell, "SHCreateItemFromParsingName"),
+    ("shell.SHGetPathFromIDList", shell, "SHGetPathFromIDList"),
+    ("shell.SHGetNameFromIDList", shell, "SHGetNameFromIDList"),
+    ("shell.SHBindToParent", shell, "SHBindToParent"),
+    ("shellcon.SIGDN_DESKTOPABSOLUTEPARSING", shellcon,
+     "SIGDN_DESKTOPABSOLUTEPARSING"),
+]
+
+# 這些不存在也不影響運作，只是備援路徑少一條。
+_OPTIONAL_APIS = {
+    "shell.SHGetNameFromIDList",
+    "shell.SHBindToParent",
+    "shellcon.SIGDN_DESKTOPABSOLUTEPARSING",
+}
+
+
+def api_report():
+    """回傳 [(名稱, 存不存在, 是不是必要), ...]。"""
+    return [(label, hasattr(module, attr), label not in _OPTIONAL_APIS)
+            for label, module, attr in _REQUIRED_APIS]
+
+
+def log_api_report():
+    """把 API 檢查結果寫進 log。啟動時呼叫一次。"""
+    missing_required = []
+    for label, present, required in api_report():
+        log.info("Shell API %-42s %s%s", label,
+                 "有" if present else "沒有",
+                 "" if required else "（選配）")
+        if required and not present:
+            missing_required.append(label)
+    if missing_required:
+        log.error("★ 缺少必要的 Shell API：%s —— 程式可能無法正常運作",
+                  "、".join(missing_required))
+    return missing_required

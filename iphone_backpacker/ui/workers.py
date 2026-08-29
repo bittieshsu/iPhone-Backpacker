@@ -64,6 +64,9 @@ class ShellWorker(QObject):
     def start_up(self):
         pythoncom.CoInitialize()
         log.info("worker 執行緒已進入 COM apartment")
+        # 啟動就檢查一次我們依賴的 Shell API 是否存在。
+        # 「某個 API 其實不存在」曾經偽裝成裝置行為騙過我們一次。
+        shell_ns.log_api_report()
 
     @Slot()
     def shut_down(self):

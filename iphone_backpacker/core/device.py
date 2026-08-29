@@ -67,8 +67,17 @@ def status_message(status, device_name=None):
     if status is DeviceStatus.OK:
         return "已連接：{}".format(device_name or "裝置")
     if status is DeviceStatus.NOT_FOUND:
-        return ("沒有偵測到 iPhone。\n"
-                "請用 USB 線連接手機，稍候幾秒後按「重新整理裝置」。")
+        # ★ 措辭很重要：自動偵測失敗**不代表不能用**。
+        #   左邊的樹狀清單走的是另一條路（純列舉，不看屬性），
+        #   就算偵測失敗也照樣展得開、備份得了。
+        #   訊息絕對不能讓使用者以為「偵測不到 = 沒救了」。
+        return ("沒有自動偵測到 iPhone。\n"
+                "\n"
+                "請確認：USB 線接好了、手機已解鎖、並且在手機上點過"
+                "「信任這部電腦」，然後按「重新整理裝置」。\n"
+                "\n"
+                "**如果左邊的清單裡看得到你的手機，可以直接展開它使用** ——"
+                "自動偵測只是輔助，失敗不影響瀏覽與備份。")
     return ("偵測到「{}」，但還讀不到裡面的內容。可能是下列其中一種情況：\n"
             "\n"
             "1. iPhone 還沒解鎖 → 請解鎖手機。\n"
@@ -83,45 +92,41 @@ def status_message(status, device_name=None):
 def find_portable_devices():
     """列出「本機」底下所有可攜式裝置。
 
-    ★★ 判斷依據刻意用**多重訊號**，因為單一訊號實測會漏掉裝置。
-      有使用者把 iPhone 改名成「阿神ㄟ@iPhone」後，程式顯示「沒有偵測到
-      iPhone」，但樹狀瀏覽卻能正常展開到 Internal Storage ——
-      也就是**樹能用、偵測卻失敗**。原因是兩條路走不同的判斷：
-      樹只做列舉，偵測卻要求 `SFGAO_FOLDER && !SFGAO_FILESYSTEM`。
+    ★★ 判斷依據：**`SFGAO_FOLDER` 且非 `SFGAO_FILESYSTEM`**。
 
-      現在的判斷順序（由可靠到次要）：
+      實測資料（2026-08-29，繁中 Windows 10）：
 
-      1. 解析名稱看起來是 `C:\` 或 UNC → 磁碟機／使用者資料夾，排除
-      2. **取不到解析名稱 → 視為裝置候選**。實測 iPhone 就是這種情況
-         （`SHBindToParent` 對 MTP 根節點會失敗），而磁碟機一定拿得到
-      3. 前兩者都不成立 → 回頭看 `SFGAO_FILESYSTEM`
-      4. 屬性也讀不到（None）→ 寧可放行，讓使用者自己判斷
+          下載／圖片／音樂／桌面／文件／影片   0x60000000  FOLDER | FILESYSTEM
+          OS (C:)／SDXC (D:)／USB 磁碟機 (F:)  0x60000000  FOLDER | FILESYSTEM
+          Apple iPhone                        0x20000000  FOLDER
 
-      **絕對不要比對顯示名稱。** 使用者可以把手機改成任何名字，
-      也可能用英文／日文版 Windows。
+      這條規則在這筆資料上完美區分，而且完全不看顯示名稱 ——
+      使用者把手機改成「阿偉ㄟ@iPhone」或任何名字都不受影響。
 
-    回傳空 list 時會把「本機」底下每個節點的判斷依據 dump 到 log，
-    這樣下次收到災情回報就有資料可查，不用再靠猜的。
+    ★★★ 這裡曾經被「放寬」成「取不到解析名稱就當作裝置」，結果災難性地
+      把「本機」底下**每一個**節點都判成 iPhone（包含「下載」「桌面」）。
+      根因是 `parsing_name()` 用了 pywin32 裡不存在的 `SHBindToParent`，
+      所以它對每個節點都失敗 —— 而那個「失敗」被當成了正面證據。
+
+      **原則：「取不到資訊」只代表我們不知道，永遠不能當成肯定的證據。**
+      `_classify()` 現在在資訊不足時回 False，不再從寬。
+
+    偵測不到任何裝置時，會把每個節點的判斷依據 dump 到 log。
     """
     this_pc = shell_ns.this_pc_pidl()
     devices: List[Device] = []
     diagnostics = []
 
-    for child_abs, name, attrs in shell_ns.iter_entries(
-        this_pc, flags=shell_ns.EVERYTHING, want_attributes=True
+    for child_abs, name, attrs, parsing in shell_ns.iter_entries(
+        this_pc, flags=shell_ns.EVERYTHING,
+        want_attributes=True, want_parsing=True,
     ):
-        try:
-            parsing = shell_ns.parsing_name(child_abs)
-        except Exception as exc:   # noqa: BLE001 - 診斷用，取不到不該影響偵測
-            log.debug("取不到解析名稱（%s）：%s", name, exc)
-            parsing = ""
-
         verdict, reason = _classify(parsing, attrs)
         diagnostics.append((name, parsing, attrs, verdict, reason))
 
         if verdict:
             entry = FileEntry(name=name, is_dir=True, abs_pidl=child_abs)
-            devices.append(Device(entry=entry, parsing_name=parsing))
+            devices.append(Device(entry=entry, parsing_name=parsing or ""))
             log.info("偵測到可攜式裝置：%s（依據：%s）", name, reason)
 
     if not devices:
@@ -129,8 +134,8 @@ def find_portable_devices():
         for name, parsing, attrs, verdict, reason in diagnostics:
             log.warning("    %-24s attrs=%s parsing=%s → %s（%s）",
                         name,
-                        "None" if attrs is None else "0x{:08X}".format(attrs),
-                        parsing or "（取不到）",
+                        "None（讀不到）" if attrs is None else "0x{:08X}".format(attrs),
+                        "None（讀不到）" if parsing is None else (parsing or "（空字串）"),
                         "裝置" if verdict else "排除", reason)
 
     return devices
@@ -139,27 +144,28 @@ def find_portable_devices():
 def _classify(parsing, attrs):
     """判斷一個「本機」底下的節點是不是可攜式裝置。
 
-    回傳 (是不是裝置, 判斷依據的文字說明)。文字會寫進 log，
+    回傳 (是不是裝置, 判斷依據的文字說明)。文字會寫進 log 與診斷報告，
     收到災情回報時才知道是哪一條規則做的決定。
+
+    參數的 None 代表**取不到**，跟空字串或 0 不一樣，不可混用。
     """
-    if shell_ns.looks_like_filesystem_path(parsing):
+    # 最可靠的排除依據：解析名稱是 C:\ 或 UNC。
+    if parsing and shell_ns.looks_like_filesystem_path(parsing):
         return False, "解析名稱是檔案系統路徑"
 
-    if not parsing:
-        # 磁碟機與使用者資料夾一定取得到解析名稱，取不到反而是裝置的特徵。
-        if attrs is not None and not (attrs & shellcon.SFGAO_FOLDER):
-            return False, "沒有解析名稱，但也不是資料夾節點"
-        return True, "取不到解析名稱（MTP 裝置的典型特徵）"
+    if attrs is not None:
+        if attrs & shellcon.SFGAO_FILESYSTEM:
+            return False, "SFGAO_FILESYSTEM 已設定（對應到真實檔案系統）"
+        if not (attrs & shellcon.SFGAO_FOLDER):
+            return False, "不是資料夾節點"
+        return True, "SFGAO_FOLDER 且非 FILESYSTEM"
 
-    if attrs is None:
-        # 屬性讀不到就寧可放行 —— 少偵測到裝置的代價比誤判大得多。
-        return True, "解析名稱不是檔案系統路徑，屬性讀不到，從寬認定"
+    # 屬性讀不到時，只有在解析名稱明確不是檔案系統路徑的情況下才算數。
+    if parsing:
+        return True, "屬性讀不到，但解析名稱不是檔案系統路徑"
 
-    if attrs & shellcon.SFGAO_FILESYSTEM:
-        return False, "SFGAO_FILESYSTEM 已設定"
-    if not (attrs & shellcon.SFGAO_FOLDER):
-        return False, "不是資料夾節點"
-    return True, "SFGAO_FOLDER 且非 FILESYSTEM"
+    # 兩個訊號都沒有 → 我們就是不知道。不知道不等於是裝置。
+    return False, "屬性與解析名稱都取不到，無法判斷"
 
 
 def probe(device):
@@ -182,12 +188,29 @@ def probe(device):
 
 
 def detect():
-    """一次完成「找裝置 + 判斷狀態」。回傳 (status, device or None)。"""
+    """一次完成「找裝置 + 判斷狀態」。回傳 (status, device or None)。
+
+    ★ 判斷規則正常時通常只會有一個候選。萬一有多個，
+      優先挑**實際讀得到內容**的那一個 —— 用結構而不是名稱來決定，
+      這樣就算判斷規則過寬，也不會挑到「下載」這種空殼。
+    """
     devices = find_portable_devices()
     if not devices:
         return DeviceStatus.NOT_FOUND, None
-    device = devices[0]     # v1 只處理第一台；多裝置由 UI 讓使用者選
-    return probe(device), device
+
+    if len(devices) == 1:
+        return probe(devices[0]), devices[0]
+
+    log.info("有 %d 個候選裝置，改用「讀不讀得到內容」來挑", len(devices))
+    first_status = None
+    for candidate in devices:
+        status = probe(candidate)
+        if status is DeviceStatus.OK:
+            log.info("選擇「%s」：讀得到內容", candidate.name)
+            return status, candidate
+        if first_status is None:
+            first_status = status
+    return first_status or DeviceStatus.LOCKED_OR_UNTRUSTED, devices[0]
 
 
 def find_photo_folders(root, categories=MEDIA, *,
