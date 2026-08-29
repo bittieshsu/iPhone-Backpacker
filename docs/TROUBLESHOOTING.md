@@ -125,19 +125,23 @@ Windows 7／8 沒辦法用，這是硬性限制（程式用的圖形介面框架
 
 ---
 
-## 都試過了還是不行
+## 都試過了還是不行 → 產生診斷報告
 
-到 [GitHub Issues](https://github.com/3chdog/iPhone-Backpacker/issues) 開一個問題，
-附上這個檔案會很有幫助：
+程式的工具列上有一顆**「產生診斷報告」**按鈕。按下去會在**桌面**產生一個
+`iPhoneBackpacker-診斷報告-日期時間.txt`，把那個檔案傳給開發者就好。
 
-```
-%LOCALAPPDATA%\iPhoneBackpacker\logs\backpacker.log
-```
+> 💡 如果是「某個資料夾的檔案數看起來不對」，**先在左邊點選那個資料夾再按**，
+> 報告會多做一段針對它的逐項檢查。
 
-（把這段貼到檔案總管的網址列按 Enter 就會開啟資料夾。）
+報告裡有什麼：
 
-順便說明一下你卡在上面流程圖的哪一步，以及：
+- 你的 Windows 版本、程式版本
+- 「本機」底下每個項目，以及程式為什麼判定它是不是 iPhone
+- 照片資料夾的完整清單
+- 你選取的那個資料夾裡實際有什麼
+- 程式最近的執行紀錄
 
-- Windows 版本（`winver` 顯示的）
-- iPhone 型號與 iOS 版本
-- 檔案總管**看不看得到** Apple iPhone
+**裡面只有裝置與資料夾的名稱，不包含你的照片。**
+
+然後到 [GitHub Issues](https://github.com/3chdog/iPhone-Backpacker/issues)
+開一個問題，附上那個 .txt，並說明你卡在上面流程圖的哪一步。

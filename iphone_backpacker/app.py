@@ -32,6 +32,7 @@ def _connect(window, worker):
     window.request_count_batch.connect(worker.count_files_batch)
     window.request_copy.connect(worker.start_copy)
     window.request_clear_cache.connect(worker.clear_cache)
+    window.request_report.connect(worker.build_report)
 
     # worker → 主執行緒
     worker.device_detected.connect(window.on_device_detected)
@@ -39,10 +40,14 @@ def _connect(window, worker):
     worker.subfolders_ready.connect(window.on_subfolders_ready)
     worker.subfolders_failed.connect(window.on_subfolders_failed)
     worker.file_count_ready.connect(window.on_file_count_ready)
+    worker.file_count_failed.connect(window.on_file_count_failed)
     worker.count_batch_progress.connect(window.on_count_batch_progress)
     worker.copy_progress.connect(window.on_copy_progress)
     worker.copy_finished.connect(window.on_copy_finished)
     worker.copy_failed.connect(window.on_copy_failed)
+    worker.report_progress.connect(window.on_report_progress)
+    worker.report_ready.connect(window.on_report_ready)
+    worker.report_failed.connect(window.on_report_failed)
 
 
 def main():

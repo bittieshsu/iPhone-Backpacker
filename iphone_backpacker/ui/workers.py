@@ -20,7 +20,7 @@ import threading
 import pythoncom
 from PySide6.QtCore import QObject, Signal, Slot
 
-from ..core import copier, device, listing, shell_ns
+from ..core import copier, device, diagnostics, listing, shell_ns
 from ..core.errors import BackpackerError
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,13 @@ class ShellWorker(QObject):
 
     # 資料夾摘要（背景算，永不阻塞選取）
     file_count_ready = Signal(object, int)          # folder_pidl, count
+    file_count_failed = Signal(object, str)         # folder_pidl, 錯誤訊息
     count_batch_progress = Signal(int, int)         # 已完成, 總數
+
+    # 診斷報告
+    report_progress = Signal(str)                   # 目前在跑哪一段
+    report_ready = Signal(str)                      # 報告檔的完整路徑
+    report_failed = Signal(str)
 
     # 複製
     copy_progress = Signal(object)                  # CopyProgress
@@ -58,6 +64,9 @@ class ShellWorker(QObject):
     def start_up(self):
         pythoncom.CoInitialize()
         log.info("worker 執行緒已進入 COM apartment")
+        # 啟動就檢查一次我們依賴的 Shell API 是否存在。
+        # 「某個 API 其實不存在」曾經偽裝成裝置行為騙過我們一次。
+        shell_ns.log_api_report()
 
     @Slot()
     def shut_down(self):
@@ -151,10 +160,17 @@ class ShellWorker(QObject):
             log.info("批次計算完成")
 
     def _count_one(self, folder_pidl, categories):
+        """算一個資料夾的檔案數。讀不到時回 None 並發出 file_count_failed。
+
+        ★ 讀取失敗**絕對不能顯示成 0**。使用者看到 0 會以為那個資料夾是空的，
+          於是不去備份它 —— 但實際上是我們沒讀到。這正是災情回報裡
+          「最新的 202608_a 顯示 0 個檔案」的可疑之處。
+        """
         try:
             return sum(1 for _ in listing.iter_files(folder_pidl, categories))
         except BackpackerError as exc:
-            log.debug("計算檔案數失敗：%s", exc)
+            log.warning("計算檔案數失敗：%s", exc)
+            self.file_count_failed.emit(folder_pidl, str(exc))
             return None
 
     @Slot(object, str, object, int)
@@ -173,6 +189,29 @@ class ShellWorker(QObject):
             self.copy_failed.emit(str(exc))
             return
         self.copy_finished.emit(report)
+
+    @Slot(object)
+    def build_report(self, focus_folder):
+        """產生診斷報告並存成 .txt。
+
+        ★ 這件事一定要在 worker 執行緒做 —— 它要碰 Shell COM，
+          而且會跑好幾秒（要列舉「本機」與裝置的資料夾）。
+
+        focus_folder 是使用者目前選取的資料夾，可以是 None。
+        """
+        try:
+            text = diagnostics.collect_report(
+                focus_folder=focus_folder,
+                progress=self.report_progress.emit,
+            )
+            path = diagnostics.write_report(text)
+        except Exception as exc:   # noqa: BLE001
+            # 診斷報告是「出問題的時候」用的，所以它自己絕對不能因為
+            # 未預期的例外而失敗得無聲無息。這裡刻意攔下所有例外。
+            log.exception("產生診斷報告失敗")
+            self.report_failed.emit(str(exc))
+            return
+        self.report_ready.emit(str(path))
 
     @Slot()
     def clear_cache(self):
