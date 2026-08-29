@@ -70,6 +70,10 @@ iPhone 上：**設定 → App → 照片 → 傳送到 Mac 或 PC**
 
 ![等待裝置準備好](docs/img/2_waiting_for_connection.png)
 
+> 🔧 **電腦一直看不到 iPhone？**
+> [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) 有一張檢查流程圖，
+> 從「還沒插線」到「看得到照片資料夾」中間會卡住的地方都列出來了。
+
 ### 步驟 3：挑資料夾
 
 左邊展開 **Apple iPhone → Internal Storage**，裡面就是照片資料夾
@@ -133,6 +137,15 @@ iPhone 上：**設定 → App → 照片 → 傳送到 Mac 或 PC**
 
 改完之後傳輸是直接送原始檔，速度會穩定很多。真的需要 JPG 的話，在電腦上轉檔
 比讓手機轉快得多。
+
+### 電腦看不到 iPhone
+
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) 有完整的檢查流程圖。
+最常見的三個原因：
+
+1. **USB 線只能充電、不能傳資料** —— 外觀看不出來，換一條原廠線試試
+2. **手機沒解鎖，或沒點「信任這部電腦」**
+3. **點了「信任」之後還要再等 1～2 分鐘** —— 這段期間資料夾本來就是空的
 
 ### 第一次執行時 Windows 擋下來
 

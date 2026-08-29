@@ -2,6 +2,7 @@
 
 | 路徑 | 給誰看 | 內容 |
 |---|---|---|
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | 電腦看不到 iPhone 的人 | 檢查流程圖，從沒插線到看得到照片資料夾 |
 | [BUILD.md](BUILD.md) | 想自己打包成 exe 的人 | 打包步驟、打包設定的理由、失敗時怎麼查 |
 | [OFFLINE-INSTALL.md](OFFLINE-INSTALL.md) | 沒有網路的環境 | 要先下載哪些 `.whl`，以及怎麼離線安裝 |
 | `img/` | README 用的螢幕截圖 | |
