@@ -177,11 +177,19 @@ def main():
                      "請記下「列出本機（冷）」的 %.1f ms。", ms_cold)
             return 0
 
-        dev = devices[0]
-        log.info("裝置：%s", dev.name)
-        status, _ = timed("probe()", lambda: device.probe(dev))
+        detection, _ = timed("detect()", device.detect)
+        dev = detection.device
+        for candidate in detection.candidates:
+            log.info("  候選：%-24s [%s] %s",
+                     candidate.name, candidate.confidence.name, candidate.reason)
+        if dev is None:
+            log.warning("沒有採用任何候選：%s", detection.status.name)
+            log.warning("%s", device.status_message(detection).replace("\n", " / "))
+            return 1
+        log.info("採用：%s（%s）", dev.name, dev.confidence.name)
+        status = detection.status
         log.info("狀態：%s", status.name)
-        log.info("訊息：%s", device.status_message(status, dev.name).replace("\n", " / "))
+        log.info("訊息：%s", device.status_message(detection).replace("\n", " / "))
         if status is not device.DeviceStatus.OK:
             log.warning("裝置內容讀不到，後面的量測跳過。"
                         "請解鎖手機並點「信任這部電腦」後重跑。")

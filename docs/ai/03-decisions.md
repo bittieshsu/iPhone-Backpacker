@@ -190,6 +190,68 @@
 
 ---
 
+## D17 — 分不出哪一台是手機時，不猜，請使用者自己選  ✅ 定案（由實測決定）
+
+**背景**：民眾B（2026-08-30）的電腦上裝了 CopyTrans Studio，它把自己掛進
+「本機」的 shell namespace。程式抓到它，橫幅顯示「已連接：CopyTrans Studio」。
+
+**根因是訊號解析度不足，不是實作有 bug。** 查證後確認：
+
+> `SFGAO_FOLDER` 且非 `SFGAO_FILESYSTEM` 只能分出「虛擬資料夾」與
+> 「真實檔案系統資料夾」。**可攜式裝置與第三方掛進「本機」的
+> namespace extension 同屬虛擬資料夾。**
+> —— [The Old New Thing, 2017-11-01](https://devblogs.microsoft.com/oldnewthing/20171101-00/?p=97325)
+
+實測佐證，兩者的屬性**完全相同**：
+
+```
+CopyTrans Studio   attrs = 0x20000000
+Apple iPhone       attrs = 0x20000000
+```
+
+**決策**：
+
+1. **新增正面證據**（`shell_ns.looks_like_portable_device`）——
+   WPD 裝置的解析名稱裡一定有裝置介面路徑 `\\?\` 或
+   `GUID_DEVINTERFACE_WPD = {6AC27878-A6FA-4155-BA85-F98F491D4F33}`；
+   第三方 namespace extension 是 `::{自己的 CLSID}`，不會有。
+   （[Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-wpd)）
+
+2. **判斷改成三值**：`CONFIRMED`（有正面證據）／`LIKELY`（是虛擬資料夾但
+   沒證據）／`EXCLUDED`。這是「有證據才升級」，**不是**「沒證據就排除」——
+   取不到解析名稱時仍可能是裝置，只是無法確認。
+
+3. **★ 分不出來時不猜。** 有多個 `CONFIRMED`、或只有多個 `LIKELY` 且不只一個
+   讀得到內容 → `DeviceStatus.AMBIGUOUS`，把候選清單列給使用者，
+   請他自己在樹狀清單裡展開。
+
+**為什麼「挑第一個 probe 成功的」不夠**：那個保險只能擋掉空殼。
+CopyTrans Studio **真的有內容**（`Photo library` 底下有 Albums、Camera roll…），
+所以 probe 完全擋不住。硬挑一個然後宣稱「已連接：CopyTrans Studio」，
+比誠實說「有這幾個，請你選」糟糕得多 —— 何況樹狀清單本來就全部列出來，
+使用者自己展開就能備份。
+
+**沒有採用的方向**：用 `Internal Storage`、`DCIM` 這類名稱來判斷。
+那還是在比對字串，只是換一個字串，違反 D5。
+
+---
+
+## D18 — 目的地資料夾名稱一律消毒  ✅ 定案
+
+**背景**：使用者可以在樹狀清單裡選**任何**節點，不只是手機的照片資料夾。
+
+**問題**：虛擬節點的顯示名稱**不受檔案系統的命名限制**。
+勾到「Local Disk (C:)」時，`plan.dest_dir / source.name` 會拿含冒號的名字去
+`mkdir()`，直接拋 `OSError`。
+
+**決策**：新增 `core/naming.py` 的 `safe_folder_name()`，處理非法字元、
+控制字元、結尾的句點與空白、Windows 保留字（CON/PRN/COM1…）、過長名稱。
+
+`core/naming.py` **刻意不 import pywin32**，所以在 Linux 上也能跑真正的測試
+（不是對照實作）。
+
+---
+
 ## D15 — 取消時「還沒輪到的檔案」不算失敗  ✅ 定案（由實測發現）
 
 **背景**：實測 log

@@ -40,6 +40,7 @@ from . import shell_ns
 from .errors import DestinationError, OperationCancelled, ShellError
 from .filters import MEDIA, describe
 from .listing import FileEntry, iter_files
+from .naming import safe_folder_name
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,9 @@ class CopyReport:
     skipped_existing: List[str] = field(default_factory=list)
     cancelled: List[str] = field(default_factory=list)
     aborted: bool = False
+    #: 來源一個檔案都讀不到（而且目的地也沒有既有檔案可以跳過）。
+    #: 這通常代表裝置連線出問題，不是「已經備份好了」。
+    source_empty: bool = False
 
     @property
     def ok(self):
@@ -108,6 +112,8 @@ class CopyReport:
             parts.append("跳過 {} 個（已存在）".format(len(self.skipped_existing)))
         if self.failed:
             parts.append("失敗 {} 個".format(len(self.failed)))
+        if self.source_empty:
+            parts.append("來源讀不到任何檔案")
         if self.cancelled:
             # ★ 取消時「還沒輪到的檔案」不是失敗，要分開講。
             #   混在一起會讓使用者看到「失敗 243 個」而以為出大事。
@@ -239,7 +245,7 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
     try:
         for source in plan.sources:
             check_cancel()
-            dest_sub = plan.dest_dir / source.name
+            dest_sub = plan.dest_dir / safe_folder_name(source.name)
             try:
                 dest_sub.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
@@ -277,7 +283,18 @@ def run_copy(plan, categories=MEDIA, *, owner_hwnd=None,
         return report
 
     if not jobs:
-        log.info("沒有需要複製的檔案（全部已存在）")
+        # ★ 這裡以前一律寫「全部已存在」，但那在 skipped 也是 0 的時候是**錯的**。
+        #   實測（2026-08-30，民眾B）：13 個資料夾全部「待複製 0 個、跳過 0 個」，
+        #   而程式回報「全部已存在」—— 事實上目的地什麼都沒有，是來源讀不到。
+        #   把三種情況分開講，不要讓使用者以為備份成功了。
+        if report.skipped_existing:
+            log.info("沒有需要複製的檔案（%d 個全部已存在）",
+                     len(report.skipped_existing))
+        else:
+            log.warning("來源資料夾裡讀不到任何符合條件的檔案 —— "
+                        "如果你確定裡面有照片，很可能是裝置連線異常，"
+                        "請把 USB 線拔掉重插後再試一次")
+            report.source_empty = True
         return report
 
     # ---- 第 2 段：全部排程進單一 IFileOperation ----

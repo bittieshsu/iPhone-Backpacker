@@ -119,12 +119,13 @@ def main():
     setup_logging(level=logging.INFO)
 
     with shell_ns.com_apartment():
-        status, dev = device.detect()
-        if dev is None or status is not device.DeviceStatus.OK:
-            log.error("裝置狀態：%s", status.name)
-            log.error("%s", device.status_message(status, dev.name if dev else None))
+        detection = device.detect()
+        dev = detection.device
+        if dev is None or detection.status is not device.DeviceStatus.OK:
+            log.error("裝置狀態：%s", detection.status.name)
+            log.error("%s", device.status_message(detection))
             return 1
-        log.info("裝置：%s", dev.name)
+        log.info("裝置：%s（%s）", dev.name, dev.confidence.name)
 
         # 往下找到「子資料夾最多」的那一層
         node = dev.abs_pidl

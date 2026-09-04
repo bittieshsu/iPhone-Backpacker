@@ -28,10 +28,12 @@ log = logging.getLogger("diagnose")
 
 def _find_folder(name):
     """在裝置底下找出叫這個名字的資料夾，找不到回 None。"""
-    devices = device.find_portable_devices()
-    if not devices:
+    detection = device.detect()
+    root = detection.device or (detection.candidates[0]
+                                if detection.candidates else None)
+    if root is None:
         return None
-    node = devices[0].abs_pidl
+    node = root.abs_pidl
     for _ in range(3):
         subs = listing.list_subfolders(node)
         for entry in subs:

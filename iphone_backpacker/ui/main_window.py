@@ -345,19 +345,19 @@ class MainWindow(QMainWindow):
     # 來自 worker 的回應
     # ------------------------------------------------------------------
 
-    def on_device_detected(self, status, dev):
-        name = dev.name if dev is not None else None
-        message = core_device.status_message(status, name)
+    def on_device_detected(self, detection):
+        message = core_device.status_message(detection)
         # core 用 **粗體** 標記重點（core 不能知道 UI 用什麼格式），這裡轉成 HTML。
         html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", message).replace("\n", "<br>")
         self.banner.setText(html)
-        if status is core_device.DeviceStatus.OK:
+        if detection.status is core_device.DeviceStatus.OK:
             self.banner.setStyleSheet(
                 "padding:8px; background:#e8f5e9; border:1px solid #a5d6a7;")
         else:
             self.banner.setStyleSheet(
                 "padding:8px; background:#fff3e0; border:1px solid #ffb74d;")
-        self.statusBar().showMessage(message.split("\n")[0], 6000)
+        self.statusBar().showMessage(
+            message.replace("**", "").split("\n")[0], 6000)
 
     def populate_roots(self, entries):
         """填入「本機」底下的節點（磁碟機 + iPhone 都在這裡）。"""
@@ -431,6 +431,18 @@ class MainWindow(QMainWindow):
             lines.append("備份被取消了。已經複製完成的檔案會保留，"
                          "下次再備份時會自動跳過，所以直接再按一次"
                          "「開始備份」就能接續。")
+        if report.source_empty:
+            lines.append("")
+            lines.append("⚠ 來源資料夾裡一個符合條件的檔案都讀不到。")
+            lines.append("如果你確定裡面有照片，這通常代表裝置連線出了問題。")
+            lines.append("請把 USB 線拔掉重插，等手機準備好之後再試一次。")
+        if not report.copied and report.failed and not report.aborted:
+            lines.append("")
+            lines.append("⚠ 一個檔案都沒有成功，這通常代表複製到一半"
+                         "裝置就斷線了。")
+            lines.append("請把 USB 線拔掉重插後再試一次。")
+            lines.append("如果電腦上裝了會存取 iPhone 的其他軟體"
+                         "（手機管理／備份工具之類），請先把它完全關閉。")
         if report.cancelled:
             lines.append("")
             lines.append("「尚未複製」的 {} 個檔案不是失敗 —— "

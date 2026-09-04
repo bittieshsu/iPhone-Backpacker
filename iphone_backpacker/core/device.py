@@ -11,9 +11,9 @@
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List
+from typing import List, Optional, Tuple
 
 from win32com.shell import shellcon
 
@@ -33,12 +33,31 @@ class DeviceStatus(Enum):
     OK = auto()
     NOT_FOUND = auto()
     LOCKED_OR_UNTRUSTED = auto()
+    #: 有多個候選但無法確定哪一個是使用者的手機。
+    #: 這時候**不猜** —— 請使用者自己在樹狀清單裡選（決策 D17）。
+    AMBIGUOUS = auto()
+
+
+class Confidence(Enum):
+    """對「這個節點是不是可攜式裝置」的把握程度。
+
+    ★ 為什麼需要三值：`SFGAO_FOLDER 且非 SFGAO_FILESYSTEM` 只能分出
+      「虛擬資料夾」與「真實檔案系統資料夾」，而可攜式裝置與第三方掛進
+      「本機」的 namespace extension（CopyTrans Studio 等）同屬虛擬資料夾。
+      二值判斷在原理上就分不出這兩者，只能誠實地表達「不確定」。
+    """
+
+    EXCLUDED = auto()    # 確定不是（磁碟機、使用者資料夾…）
+    LIKELY = auto()      # 是虛擬資料夾，但沒有 WPD 的正面證據
+    CONFIRMED = auto()   # 解析名稱裡有 WPD 的正面證據
 
 
 @dataclass(frozen=True)
 class Device:
     entry: FileEntry
     parsing_name: str = ""
+    confidence: Confidence = Confidence.LIKELY
+    reason: str = ""
 
     @property
     def name(self):
@@ -49,7 +68,20 @@ class Device:
         return self.entry.abs_pidl
 
 
-def status_message(status, device_name=None):
+@dataclass(frozen=True)
+class Detection:
+    """一次偵測的完整結果。
+
+    ★ 刻意把 candidates 一起帶出來：偵測不確定時，UI 要能把候選清單
+      列給使用者看，而不是硬挑一個然後宣稱「已連接：CopyTrans Studio」。
+    """
+
+    status: DeviceStatus
+    device: Optional[Device] = None
+    candidates: Tuple[Device, ...] = ()
+
+
+def status_message(detection):
     """給 UI 直接顯示的訊息。core 不碰 UI，但這段文字的正確性屬於領域知識。
 
     ★ LOCKED_OR_UNTRUSTED 的措辭很重要。實測的狀態變化是：
@@ -63,9 +95,32 @@ def status_message(status, device_name=None):
       第 4 步是關鍵：使用者已經按了「信任」，畫面卻還是叫他去按「信任」，
       會讓人以為程式壞了或自己按錯。訊息一定要涵蓋「已經按過了，請再等一下」。
       這段期間連檔案總管也看不到資料夾，所以不是本程式的問題。
+
+    ★ 每一種狀態都要讓使用者知道「還是可以自己在左邊展開手機來備份」——
+      自動偵測只是輔助，失敗或不確定都不該擋住他。
     """
+    status = detection.status
+    name = detection.device.name if detection.device is not None else None
+
     if status is DeviceStatus.OK:
-        return "已連接：{}".format(device_name or "裝置")
+        if detection.device is not None and \
+                detection.device.confidence is Confidence.LIKELY:
+            return ("已連接：{}\n"
+                    "（無法百分之百確定這是手機。如果左邊清單裡有別的裝置才是你的手機，"
+                    "直接展開那一個就好。）".format(name))
+        return "已連接：{}".format(name)
+
+    if status is DeviceStatus.AMBIGUOUS:
+        listed = "、".join("**{}**".format(d.name) for d in detection.candidates)
+        return ("偵測到多個可能的裝置：{}\n"
+                "\n"
+                "無法判斷哪一個是你的手機，所以不亂猜。\n"
+                "**請直接在左邊的清單裡展開你的手機** —— 自動偵測只是輔助，"
+                "不影響瀏覽與備份。\n"
+                "\n"
+                "（其他項目可能是別的軟體掛在「本機」底下的，例如手機管理工具。）"
+                .format(listed))
+
     if status is DeviceStatus.NOT_FOUND:
         # ★ 措辭很重要：自動偵測失敗**不代表不能用**。
         #   左邊的樹狀清單走的是另一條路（純列舉，不看屬性），
@@ -78,6 +133,7 @@ def status_message(status, device_name=None):
                 "\n"
                 "**如果左邊的清單裡看得到你的手機，可以直接展開它使用** ——"
                 "自動偵測只是輔助，失敗不影響瀏覽與備份。")
+
     return ("偵測到「{}」，但還讀不到裡面的內容。可能是下列其中一種情況：\n"
             "\n"
             "1. iPhone 還沒解鎖 → 請解鎖手機。\n"
@@ -86,32 +142,29 @@ def status_message(status, device_name=None):
             "有時候更久。請稍等一下再按「重新整理裝置」。\n"
             "\n"
             "（第 3 種情況下，用 Windows 檔案總管進去看也是空的，"
-            "這是正常現象，不是程式出問題。）".format(device_name or "裝置"))
+            "這是正常現象，不是程式出問題。）".format(name or "裝置"))
 
 
 def find_portable_devices():
-    """列出「本機」底下所有可攜式裝置。
+    """列出「本機」底下所有**可能是**可攜式裝置的節點。
 
-    ★★ 判斷依據：**`SFGAO_FOLDER` 且非 `SFGAO_FILESYSTEM`**。
+    ★★ 兩層判斷（見 `_classify`）：
 
-      實測資料（2026-08-29，繁中 Windows 10）：
+      `CONFIRMED` —— 解析名稱裡有 WPD 的正面證據（裝置介面路徑或 WPD 介面 GUID）
+      `LIKELY`    —— 是虛擬資料夾，但拿不到正面證據
 
-          下載／圖片／音樂／桌面／文件／影片   0x60000000  FOLDER | FILESYSTEM
-          OS (C:)／SDXC (D:)／USB 磁碟機 (F:)  0x60000000  FOLDER | FILESYSTEM
-          Apple iPhone                        0x20000000  FOLDER
+      **為什麼不能只用 `SFGAO_FOLDER 且非 SFGAO_FILESYSTEM`**：那組旗標只能分出
+      「虛擬資料夾」與「真實檔案系統資料夾」，而可攜式裝置與第三方掛進「本機」的
+      namespace extension **同屬虛擬資料夾**。實測（2026-08-30，民眾B）：
 
-      這條規則在這筆資料上完美區分，而且完全不看顯示名稱 ——
-      使用者把手機改成「阿偉ㄟ@iPhone」或任何名字都不受影響。
+          CopyTrans Studio   attrs = 0x20000000   ← 與 iPhone 完全相同
+          Apple iPhone       attrs = 0x20000000
 
-    ★★★ 這裡曾經被「放寬」成「取不到解析名稱就當作裝置」，結果災難性地
-      把「本機」底下**每一個**節點都判成 iPhone（包含「下載」「桌面」）。
-      根因是 `parsing_name()` 用了 pywin32 裡不存在的 `SHBindToParent`，
-      所以它對每個節點都失敗 —— 而那個「失敗」被當成了正面證據。
+      舊版因此把 CopyTrans Studio 當成手機，橫幅顯示「已連接：CopyTrans Studio」。
 
-      **原則：「取不到資訊」只代表我們不知道，永遠不能當成肯定的證據。**
-      `_classify()` 現在在資訊不足時回 False，不再從寬。
+    ★ 全程不看顯示名稱。使用者可以把手機改成任何名字。
 
-    偵測不到任何裝置時，會把每個節點的判斷依據 dump 到 log。
+    回傳的順序是 Shell 的列舉順序，**沒有排序**，呼叫端不應該依賴它。
     """
     this_pc = shell_ns.this_pc_pidl()
     devices: List[Device] = []
@@ -121,22 +174,25 @@ def find_portable_devices():
         this_pc, flags=shell_ns.EVERYTHING,
         want_attributes=True, want_parsing=True,
     ):
-        verdict, reason = _classify(parsing, attrs)
-        diagnostics.append((name, parsing, attrs, verdict, reason))
+        confidence, reason = _classify(parsing, attrs)
+        diagnostics.append((name, parsing, attrs, confidence, reason))
 
-        if verdict:
-            entry = FileEntry(name=name, is_dir=True, abs_pidl=child_abs)
-            devices.append(Device(entry=entry, parsing_name=parsing or ""))
-            log.info("偵測到可攜式裝置：%s（依據：%s）", name, reason)
+        if confidence is Confidence.EXCLUDED:
+            continue
+
+        entry = FileEntry(name=name, is_dir=True, abs_pidl=child_abs)
+        devices.append(Device(entry=entry, parsing_name=parsing or "",
+                              confidence=confidence, reason=reason))
+        log.info("候選裝置：%s（%s：%s）", name, confidence.name, reason)
 
     if not devices:
         log.warning("沒有偵測到可攜式裝置。「本機」底下的節點與判斷依據：")
-        for name, parsing, attrs, verdict, reason in diagnostics:
+        for name, parsing, attrs, confidence, reason in diagnostics:
             log.warning("    %-24s attrs=%s parsing=%s → %s（%s）",
-                        name,
-                        "None（讀不到）" if attrs is None else "0x{:08X}".format(attrs),
-                        "None（讀不到）" if parsing is None else (parsing or "（空字串）"),
-                        "裝置" if verdict else "排除", reason)
+                        name, shell_ns.describe_attributes(attrs),
+                        "None（讀不到）" if parsing is None
+                        else (parsing or "（空字串）"),
+                        confidence.name, reason)
 
     return devices
 
@@ -144,28 +200,43 @@ def find_portable_devices():
 def _classify(parsing, attrs):
     """判斷一個「本機」底下的節點是不是可攜式裝置。
 
-    回傳 (是不是裝置, 判斷依據的文字說明)。文字會寫進 log 與診斷報告，
+    回傳 (Confidence, 判斷依據的文字說明)。文字會寫進 log 與診斷報告，
     收到災情回報時才知道是哪一條規則做的決定。
 
     參數的 None 代表**取不到**，跟空字串或 0 不一樣，不可混用。
+
+    判斷順序（由可靠到次要）：
+      ① 解析名稱是 C:\ 或 UNC          → EXCLUDED
+      ② 屬性有 SFGAO_FILESYSTEM        → EXCLUDED
+      ③ 屬性明確沒有 SFGAO_FOLDER      → EXCLUDED
+      ④ 解析名稱有 WPD 正面證據         → CONFIRMED
+      ⑤ 是虛擬資料夾但沒有正面證據       → LIKELY
+      ⑥ 兩個訊號都取不到                → EXCLUDED（不知道不等於是裝置）
     """
-    # 最可靠的排除依據：解析名稱是 C:\ 或 UNC。
+    # ① 最可靠的排除依據。
     if parsing and shell_ns.looks_like_filesystem_path(parsing):
-        return False, "解析名稱是檔案系統路徑"
+        return Confidence.EXCLUDED, "解析名稱是檔案系統路徑"
 
     if attrs is not None:
-        if attrs & shellcon.SFGAO_FILESYSTEM:
-            return False, "SFGAO_FILESYSTEM 已設定（對應到真實檔案系統）"
-        if not (attrs & shellcon.SFGAO_FOLDER):
-            return False, "不是資料夾節點"
-        return True, "SFGAO_FOLDER 且非 FILESYSTEM"
+        # ② 對應到真實檔案系統 → 磁碟機或使用者資料夾。
+        if attrs & shell_ns.SFGAO_FILESYSTEM:
+            return Confidence.EXCLUDED, "SFGAO_FILESYSTEM 已設定（對應到真實檔案系統）"
+        # ③ 連資料夾都不是。
+        if not (attrs & shell_ns.SFGAO_FOLDER):
+            return Confidence.EXCLUDED, "不是資料夾節點"
 
-    # 屬性讀不到時，只有在解析名稱明確不是檔案系統路徑的情況下才算數。
+    # ④ 正面證據 —— 這是唯一能把可攜式裝置跟第三方掛載分開的訊號。
+    if shell_ns.looks_like_portable_device(parsing):
+        return Confidence.CONFIRMED, "解析名稱含 WPD 裝置介面（確定是可攜式裝置）"
+
+    # ⑤ 是虛擬資料夾，但可能是第三方掛進「本機」的東西。
+    if attrs is not None:
+        return Confidence.LIKELY, "是虛擬資料夾，但沒有 WPD 證據（也可能是其他軟體掛載的）"
     if parsing:
-        return True, "屬性讀不到，但解析名稱不是檔案系統路徑"
+        return Confidence.LIKELY, "屬性讀不到，解析名稱不是檔案系統路徑，也沒有 WPD 證據"
 
-    # 兩個訊號都沒有 → 我們就是不知道。不知道不等於是裝置。
-    return False, "屬性與解析名稱都取不到，無法判斷"
+    # ⑥ 兩個訊號都沒有 → 我們就是不知道。不知道不等於是裝置。
+    return Confidence.EXCLUDED, "屬性與解析名稱都取不到，無法判斷"
 
 
 def probe(device):
@@ -188,29 +259,54 @@ def probe(device):
 
 
 def detect():
-    """一次完成「找裝置 + 判斷狀態」。回傳 (status, device or None)。
+    """找裝置並判斷狀態。回傳 `Detection`。
 
-    ★ 判斷規則正常時通常只會有一個候選。萬一有多個，
-      優先挑**實際讀得到內容**的那一個 —— 用結構而不是名稱來決定，
-      這樣就算判斷規則過寬，也不會挑到「下載」這種空殼。
+    ★★ 挑選規則（決策 D17）：
+
+        有 CONFIRMED → 只在 CONFIRMED 裡挑
+                         1 個 → 用它
+                        >1 個 → AMBIGUOUS，請使用者自己選
+        只有 LIKELY  → probe 一遍
+                        剛好 1 個讀得到內容 → 用它
+                        其他情況            → AMBIGUOUS
+
+      **分不出來的時候不猜。** 舊版「挑第一個 probe 成功的」在民眾B 的機器上
+      挑到了 CopyTrans Studio —— 它不是空殼，真的有內容，所以 probe 擋不住。
+      硬挑一個然後宣稱「已連接：CopyTrans Studio」比誠實說「有這幾個，請你選」
+      糟糕得多；何況樹狀清單本來就全部列出來，使用者自己展開就能備份。
     """
-    devices = find_portable_devices()
-    if not devices:
-        return DeviceStatus.NOT_FOUND, None
+    candidates = tuple(find_portable_devices())
+    if not candidates:
+        return Detection(DeviceStatus.NOT_FOUND, None, ())
 
-    if len(devices) == 1:
-        return probe(devices[0]), devices[0]
+    confirmed = [d for d in candidates if d.confidence is Confidence.CONFIRMED]
 
-    log.info("有 %d 個候選裝置，改用「讀不讀得到內容」來挑", len(devices))
-    first_status = None
-    for candidate in devices:
-        status = probe(candidate)
-        if status is DeviceStatus.OK:
-            log.info("選擇「%s」：讀得到內容", candidate.name)
-            return status, candidate
-        if first_status is None:
-            first_status = status
-    return first_status or DeviceStatus.LOCKED_OR_UNTRUSTED, devices[0]
+    if len(confirmed) == 1:
+        device = confirmed[0]
+        log.info("採用「%s」：有 WPD 正面證據", device.name)
+        return Detection(probe(device), device, candidates)
+
+    if len(confirmed) > 1:
+        log.info("有 %d 個確定的可攜式裝置，無法判斷哪一個是使用者要的",
+                 len(confirmed))
+        return Detection(DeviceStatus.AMBIGUOUS, None, candidates)
+
+    # 沒有任何一個拿得到正面證據 —— 可能是解析名稱讀不到，
+    # 也可能全都是第三方掛載。用「讀不讀得到內容」再篩一次。
+    if len(candidates) == 1:
+        device = candidates[0]
+        log.info("只有一個候選「%s」，採用（未確認是可攜式裝置）", device.name)
+        return Detection(probe(device), device, candidates)
+
+    readable = [d for d in candidates if probe(d) is DeviceStatus.OK]
+    if len(readable) == 1:
+        device = readable[0]
+        log.info("採用「%s」：候選中只有它讀得到內容（未確認）", device.name)
+        return Detection(DeviceStatus.OK, device, candidates)
+
+    log.info("有 %d 個候選、其中 %d 個讀得到內容，無法判斷哪一個是使用者要的",
+             len(candidates), len(readable))
+    return Detection(DeviceStatus.AMBIGUOUS, None, candidates)
 
 
 def find_photo_folders(root, categories=MEDIA, *,

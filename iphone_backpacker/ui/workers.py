@@ -30,7 +30,7 @@ class ShellWorker(QObject):
     """所有 Shell 操作的執行者。由 MainWindow 移到獨立的 QThread 裡。"""
 
     # 裝置偵測
-    device_detected = Signal(object, object)        # DeviceStatus, Device | None
+    device_detected = Signal(object)                # core.device.Detection
 
     # 樹狀展開
     roots_ready = Signal(object)                    # list[FileEntry]（「本機」底下）
@@ -88,12 +88,12 @@ class ShellWorker(QObject):
     @Slot()
     def detect_device(self):
         try:
-            status, dev = device.detect()
+            detection = device.detect()
         except BackpackerError as exc:
             log.exception("裝置偵測失敗")
-            status, dev = device.DeviceStatus.NOT_FOUND, None
+            detection = device.Detection(device.DeviceStatus.NOT_FOUND)
             log.error("%s", exc)
-        self.device_detected.emit(status, dev)
+        self.device_detected.emit(detection)
 
     @Slot()
     def load_roots(self):
