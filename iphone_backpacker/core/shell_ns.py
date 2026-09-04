@@ -249,17 +249,72 @@ def iter_entries(abs_pidl, flags=EVERYTHING, want_attributes=False,
         yield combine(abs_pidl, rel_pidl), name, attributes, parsing
 
 
+def _sfgao(name, fallback):
+    """取 shellcon 的 SFGAO_* 常數，取不到就用官方文件上的值。
+
+    不同版本的 pywin32 不見得都定義了每一個旗標，而我們已經被
+    「假設某個符號存在」害過一次（見 parsing_name 的說明）。
+    """
+    return getattr(shellcon, name, fallback)
+
+
+SFGAO_FOLDER = _sfgao("SFGAO_FOLDER", 0x20000000)
+SFGAO_FILESYSTEM = _sfgao("SFGAO_FILESYSTEM", 0x40000000)
+SFGAO_FILESYSANCESTOR = _sfgao("SFGAO_FILESYSANCESTOR", 0x10000000)
+SFGAO_STORAGE = _sfgao("SFGAO_STORAGE", 0x00000008)
+SFGAO_STREAM = _sfgao("SFGAO_STREAM", 0x00400000)
+SFGAO_STORAGEANCESTOR = _sfgao("SFGAO_STORAGEANCESTOR", 0x00800000)
+SFGAO_REMOVABLE = _sfgao("SFGAO_REMOVABLE", 0x02000000)
+SFGAO_BROWSABLE = _sfgao("SFGAO_BROWSABLE", 0x08000000)
+
+# ★ GetAttributesOf 只會回傳「你在 mask 裡問到的位元」。
+#   以前只問 FOLDER|FILESYSTEM，所以 0x20000000 的意思是
+#   「在我問的兩個位元裡只有 FOLDER」，**不代表其他位元是 0 —— 我們沒問**。
+#
+#   現在一次多問幾個。這**不會增加 COM 呼叫次數**（同一次呼叫），
+#   多出來的位元目前**只寫進診斷報告，不參與判斷** ——
+#   先累積真實資料，確認 WPD 裝置與第三方掛載在這些位元上真的有穩定差異，
+#   再考慮拿來用。這是上次踩坑之後該有的紀律。
+DEFAULT_ATTRIBUTE_MASK = (
+    SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_FILESYSANCESTOR
+    | SFGAO_STORAGE | SFGAO_STREAM | SFGAO_STORAGEANCESTOR
+    | SFGAO_REMOVABLE | SFGAO_BROWSABLE
+)
+
+_ATTRIBUTE_NAMES = [
+    ("FOLDER", SFGAO_FOLDER),
+    ("FILESYSTEM", SFGAO_FILESYSTEM),
+    ("FILESYSANCESTOR", SFGAO_FILESYSANCESTOR),
+    ("STORAGE", SFGAO_STORAGE),
+    ("STREAM", SFGAO_STREAM),
+    ("STORAGEANCESTOR", SFGAO_STORAGEANCESTOR),
+    ("REMOVABLE", SFGAO_REMOVABLE),
+    ("BROWSABLE", SFGAO_BROWSABLE),
+]
+
+
+def describe_attributes(attrs):
+    """把屬性值攤成人看得懂的旗標名稱，給診斷報告用。"""
+    if attrs is None:
+        return "None（讀不到）"
+    flags = [label for label, bit in _ATTRIBUTE_NAMES if attrs & bit]
+    return "0x{:08X}（{}）".format(attrs, " | ".join(flags) if flags else "無")
+
+
 def attributes_of(folder, rel_pidl, mask=None):
     """取得項目的 SFGAO_* 屬性。
 
-    我們主要用兩個旗標來判斷「這是不是可攜式裝置」：
+    判斷「是不是可攜式裝置」主要看兩個旗標：
       SFGAO_FOLDER      是資料夾類的節點
       SFGAO_FILESYSTEM  對應到真實檔案系統
-    iPhone 這種 MTP 裝置是 FOLDER 但 **不是** FILESYSTEM，而磁碟機兩者皆是。
-    這個判斷語言中立，也不受使用者把手機改名影響。
+
+    ★ 但要注意：這兩個旗標只能分出「虛擬資料夾」與「真實檔案系統資料夾」。
+      **可攜式裝置和第三方掛進「本機」的 namespace extension
+      （例如 CopyTrans Studio）同屬「虛擬資料夾」**，這組旗標分不出來。
+      要區分得靠 looks_like_portable_device() 的解析名稱證據。
     """
     if mask is None:
-        mask = shellcon.SFGAO_FOLDER | shellcon.SFGAO_FILESYSTEM
+        mask = DEFAULT_ATTRIBUTE_MASK
     try:
         return folder.GetAttributesOf([rel_pidl], mask)
     except pythoncom.com_error as exc:
@@ -289,6 +344,47 @@ def looks_like_filesystem_path(name):
     if name.startswith("\\\\"):       # UNC 網路路徑
         return True
     return False
+
+
+# WPD 的裝置介面類別 GUID。所有 WPD 驅動都會註冊這個介面，
+# 所以可攜式裝置的解析名稱裡一定看得到它。
+#   https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-wpd
+_WPD_DEVICE_INTERFACE = "{6ac27878-a6fa-4155-ba85-f98f491d4f33}"
+
+# 「Portable Devices」這個 delegate folder 在「本機」底下的 CLSID。
+_WPD_NAMESPACE = "{35786d3c-b075-49b9-88dd-029876e11c01}"
+
+# Win32 裝置介面路徑的開頭。實測 iPhone 的解析名稱長這樣：
+#   ::{20D04FE0-...}\\?\usb#vid_05ac&pid_12a8#<序號>#{6ac27878-...}
+_DEVICE_INTERFACE_PREFIX = "\\\\?\\"
+
+
+def looks_like_portable_device(parsing):
+    """解析名稱裡有沒有「這是一台可攜式裝置」的正面證據。
+
+    ★★ 為什麼需要這個：`SFGAO_FOLDER 且非 SFGAO_FILESYSTEM` 只能分出
+      「虛擬資料夾」與「真實檔案系統資料夾」。**可攜式裝置與第三方掛進
+      「本機」的 namespace extension 同屬虛擬資料夾**，那組旗標在原理上
+      就分不出來 —— 不是實作有 bug，是訊號解析度不夠。
+
+      實測（2026-08-30，民眾B）：
+
+          CopyTrans Studio   attrs = 0x20000000   ← 跟 iPhone 一模一樣
+          Apple iPhone       attrs = 0x20000000
+
+      所以要另外找一個**正面**證據。WPD 裝置的解析名稱裡一定帶著
+      裝置介面路徑或 WPD 的介面 GUID，第三方 namespace extension 則是
+      `::{自己的 CLSID}`，不會有這些東西。
+
+    ★ 這是「有證據才升級為確認」，**不是**「沒證據就排除」——
+      取不到解析名稱時仍然可能是裝置，只是我們無法確認。
+    """
+    if not parsing:
+        return False
+    lowered = parsing.lower()
+    return (_DEVICE_INTERFACE_PREFIX in parsing
+            or _WPD_DEVICE_INTERFACE in lowered
+            or _WPD_NAMESPACE in lowered)
 
 
 def find_child(abs_pidl, name, flags=EVERYTHING):
@@ -386,6 +482,12 @@ _REQUIRED_APIS = [
     ("shell.SHBindToParent", shell, "SHBindToParent"),
     ("shellcon.SIGDN_DESKTOPABSOLUTEPARSING", shellcon,
      "SIGDN_DESKTOPABSOLUTEPARSING"),
+    # 如果 pywin32 有這個，SHGDFIL_DESCRIPTIONID 可以直接讀出
+    # 「擁有這個節點的 namespace extension 是哪個 CLSID」——
+    # 那會是區分可攜式裝置與第三方掛載最決定性的訊號。
+    # 目前**只檢查存不存在**，還沒拿來用。先確認事實再決定。
+    ("shell.SHGetDataFromIDList", shell, "SHGetDataFromIDList"),
+    ("shellcon.SHGDFIL_DESCRIPTIONID", shellcon, "SHGDFIL_DESCRIPTIONID"),
 ]
 
 # 這些不存在也不影響運作，只是備援路徑少一條。
@@ -393,6 +495,8 @@ _OPTIONAL_APIS = {
     "shell.SHGetNameFromIDList",
     "shell.SHBindToParent",
     "shellcon.SIGDN_DESKTOPABSOLUTEPARSING",
+    "shell.SHGetDataFromIDList",
+    "shellcon.SHGDFIL_DESCRIPTIONID",
 }
 
 

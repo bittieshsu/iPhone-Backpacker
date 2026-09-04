@@ -100,14 +100,17 @@ def _describe_this_pc(report):
         this_pc, flags=shell_ns.EVERYTHING,
         want_attributes=True, want_parsing=True,
     ):
-        verdict, reason = device._classify(parsing, attrs)
+        confidence, reason = device._classify(parsing, attrs)
+        marks = {
+            device.Confidence.CONFIRMED: "★ 確定是可攜式裝置",
+            device.Confidence.LIKELY: "？ 可能是裝置，也可能是其他軟體掛載的",
+            device.Confidence.EXCLUDED: "－ 不是裝置",
+        }
         report.say("  {}".format(name))
-        report.say("      attrs   = {}".format(
-            "None（讀不到）" if attrs is None else "0x{:08X}".format(attrs)))
+        report.say("      attrs   = {}".format(shell_ns.describe_attributes(attrs)))
         report.say("      parsing = {}".format(
             "None（讀不到）" if parsing is None else (parsing or "（空字串）")))
-        report.say("      判定    = {}（{}）".format(
-            "★ 是裝置" if verdict else "不是裝置", reason))
+        report.say("      判定    = {}（{}）".format(marks[confidence], reason))
 
 
 def _describe_api(report):
@@ -133,25 +136,37 @@ def _describe_api(report):
 
 
 def _describe_device(report):
-    devices = device.find_portable_devices()
-    if not devices:
-        report.say("!! 沒有偵測到任何可攜式裝置。")
-        report.say("!! 上面那張表就是原因 —— 請連同這份報告回報。")
-        return None
+    """★ 這裡呼叫 detect()，跟程式實際使用的邏輯完全一樣。
 
-    dev = devices[0]
-    report.say("裝置名稱：{}".format(dev.name))
-    report.say("解析名稱：{}".format(dev.parsing_name or "（取不到，這對 MTP 裝置是正常的）"))
-    if len(devices) > 1:
-        report.say("（另外還偵測到 {} 個裝置，程式目前只處理第一個）".format(
-            len(devices) - 1))
+    以前是自己拿 find_portable_devices()[0]，跟 detect() 的挑選規則不同 ——
+    報告顯示的裝置可能根本不是程式真正在用的那一個，等於報告在騙人。
+    """
+    detection = device.detect()
 
-    status = device.probe(dev)
-    report.say("狀態：{}".format(status.name))
+    report.say("候選裝置（{} 個）：".format(len(detection.candidates)))
+    for candidate in detection.candidates:
+        report.say("  {}  [{}]".format(candidate.name, candidate.confidence.name))
+        report.say("      {}".format(candidate.reason))
+        report.say("      parsing = {}".format(
+            candidate.parsing_name or "（取不到）"))
+    if not detection.candidates:
+        report.say("  （一個都沒有）")
+
     report.say()
-    for line in device.status_message(status, dev.name).splitlines():
+    report.say("狀態：{}".format(detection.status.name))
+    report.say("實際採用：{}".format(
+        detection.device.name if detection.device else "（沒有採用任何一個）"))
+    report.say()
+    for line in device.status_message(detection).splitlines():
         report.say("  " + line.replace("**", ""))
-    return dev if status is device.DeviceStatus.OK else None
+
+    if detection.status is device.DeviceStatus.AMBIGUOUS:
+        report.say()
+        report.say("!! 有多個候選而且無法判斷，所以程式不猜。")
+        report.say("!! 這通常表示電腦上裝了會掛進「本機」的第三方軟體"
+                   "（手機管理工具之類）。")
+        report.say("!! 使用者仍然可以在左邊的清單裡自己展開手機來備份。")
+    return detection
 
 
 def _find_richest_level(dev):
@@ -166,6 +181,25 @@ def _find_richest_level(dev):
             break
         node, label = subs[0].abs_pidl, subs[0].name
     return best
+
+
+def _describe_all_candidates(report, candidates):
+    for candidate in candidates:
+        report.say()
+        report.say("-" * 60)
+        report.say("候選：{}  [{}]".format(candidate.name,
+                                        candidate.confidence.name))
+        report.say("-" * 60)
+        try:
+            _pidl, label, entries = _find_richest_level(candidate)
+        except Exception as exc:      # noqa: BLE001
+            report.say("!! 展開失敗：{}".format(exc))
+            continue
+        if not entries:
+            report.say("（底下沒有任何子資料夾 —— "
+                       "可能未解鎖／未信任，或這根本不是儲存裝置）")
+            continue
+        _describe_folders(report, entries, label)
 
 
 def _describe_folders(report, entries, label):
@@ -197,17 +231,34 @@ def _describe_one_folder(report, folder):
     report.say("這一段用來回答：某個資料夾顯示 0 個檔案，是真的空的還是沒讀到。")
     report.say()
 
+    def count(flags, label):
+        """列舉並**記錄耗時**。
+
+        ★ 「8.8 秒回傳 0 項」和「20 毫秒回傳 0 項」是完全不同的兩件事 ——
+          前者是逾時（裝置連線壞掉），後者才是真的空資料夾。
+          民眾B 的 log 裡 13 個資料夾都剛好花 8.8 秒回傳 0 項，
+          但報告只寫「0 項」，看不出這個關鍵差異。
+        """
+        started = time.perf_counter()
+        try:
+            items = list(shell_ns.iter_entries(folder.abs_pidl, flags=flags))
+        except Exception as exc:   # noqa: BLE001
+            elapsed = (time.perf_counter() - started) * 1000
+            report.say("  {:<12} 讀取失敗（{:.0f} ms）：{}".format(
+                label, elapsed, exc))
+            return None
+        elapsed = (time.perf_counter() - started) * 1000
+        report.say("  {:<12} {} 項（{:.0f} ms）".format(label, len(items), elapsed))
+        if not items and elapsed > 1000:
+            report.say("      !! 花了 {:.1f} 秒才回傳 0 項 —— "
+                       "這比較像逾時，不像真的空資料夾。".format(elapsed / 1000))
+        return len(items)
+
     counts = {}
     for flags, label in ((shell_ns.FILES_ONLY, "只列檔案"),
                          (shell_ns.FOLDERS_ONLY, "只列資料夾"),
                          (shell_ns.EVERYTHING, "全部")):
-        try:
-            items = list(shell_ns.iter_entries(folder.abs_pidl, flags=flags))
-            counts[label] = len(items)
-            report.say("  {:<12} {} 項".format(label, len(items)))
-        except Exception as exc:   # noqa: BLE001
-            counts[label] = None
-            report.say("  {:<12} 讀取失敗：{}".format(label, exc))
+        counts[label] = count(flags, label)
 
     report.say()
     if None in counts.values():
@@ -272,26 +323,27 @@ def collect_report(focus_folder=None, progress=None):
     report.section("零、Shell API 檢查", lambda: _describe_api(report))
     report.section("一、「本機」底下有什麼", lambda: _describe_this_pc(report))
 
-    dev_holder = {}
+    holder = {}
     report.section("二、裝置偵測",
-                   lambda: dev_holder.update(dev=_describe_device(report)))
-    dev = dev_holder.get("dev")
+                   lambda: holder.update(detection=_describe_device(report)))
+    detection = holder.get("detection")
+    candidates = detection.candidates if detection is not None else ()
 
-    if dev is not None:
-        level = {}
+    if candidates:
+        # ★ 對**每一個**候選都走一次，不是只走選中的那個。
+        #   上一版只走選中的，結果在民眾B 的機器上走進了 CopyTrans Studio，
+        #   然後對著它的資料夾名稱抱怨「一個 __ 結尾的資料夾都沒有」——
+        #   完全是假警報，因為看錯裝置了。
         report.section(
-            "三、照片資料夾清單",
-            lambda: (level.update(zip(("pidl", "label", "entries"),
-                                      _find_richest_level(dev))),
-                     _describe_folders(report, level["entries"], level["label"])))
-
-        if focus_folder is not None:
-            report.section("四、[{}] 逐項檢查".format(focus_folder.name),
-                           lambda: _describe_one_folder(report, focus_folder))
-        else:
-            report.title("四、逐項檢查")
-            report.say("（沒有指定資料夾。若某個資料夾的檔案數看起來不對，")
-            report.say("　請在程式裡點選那個資料夾，再按一次「產生診斷報告」。）")
+            "三、每個候選裝置底下的資料夾",
+            lambda: _describe_all_candidates(report, candidates))
+    if focus_folder is not None:
+        report.section("四、[{}] 逐項檢查".format(focus_folder.name),
+                       lambda: _describe_one_folder(report, focus_folder))
+    else:
+        report.title("四、逐項檢查")
+        report.say("（沒有指定資料夾。若某個資料夾的檔案數看起來不對，")
+        report.say("　請在程式裡點選那個資料夾，再按一次「產生診斷報告」。）")
 
     report.section("五、紀錄檔內容", lambda: _describe_log_tail(report))
 

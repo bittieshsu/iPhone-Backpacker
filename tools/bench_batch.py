@@ -63,9 +63,11 @@ def main():
     setup_logging(level=logging.INFO)
 
     with shell_ns.com_apartment():
-        status, dev = device.detect()
-        if dev is None or status is not device.DeviceStatus.OK:
-            log.error("裝置狀態：%s", status.name)
+        detection = device.detect()
+        dev = detection.device
+        if dev is None or detection.status is not device.DeviceStatus.OK:
+            log.error("裝置狀態：%s", detection.status.name)
+            log.error("%s", device.status_message(detection))
             return 1
 
         # 找到目標資料夾

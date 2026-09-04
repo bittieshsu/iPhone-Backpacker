@@ -472,6 +472,85 @@ parsing = （取不到：module 'win32com.shell.shell' has no attribute 'SHBindT
 - `tests/test_device_classify.py` 加了一組 `TestUnknownIsNotEvidence`，
   直接重現當時的資料（所有節點 parsing 都是 None），確保不再退化。
 
+## ★★★ SFGAO 在原理上分不出「可攜式裝置」與「第三方掛載」
+
+2026-08-30，民眾B 的報告揭露了一個**訊號解析度**的問題，不是實作 bug。
+
+**症狀**：程式顯示「已連接：CopyTrans Studio」，而不是他的 iPhone。
+
+**查證結論**（[The Old New Thing](https://devblogs.microsoft.com/oldnewthing/20171101-00/?p=97325)）：
+
+| 型態 | 屬性組合 |
+|---|---|
+| **虛擬資料夾**（控制台、**可攜式裝置**、**第三方 namespace extension**） | `FOLDER`，**沒有** `FILESYSTEM` |
+| 真實檔案系統目錄 | `FOLDER` + `FILESYSTEM` |
+| 檔案裡的虛擬目錄（ZIP） | `FOLDER` + `FILESYSTEM` + `STREAM` |
+
+**`SFGAO_FILESYSTEM` 只能分出「虛擬」與「真實檔案系統」。
+可攜式裝置和第三方掛載同屬虛擬資料夾，這組旗標在原理上分不出來。**
+
+實測佐證：
+
+```
+CopyTrans Studio   attrs = 0x20000000   ← 完全相同
+Apple iPhone       attrs = 0x20000000
+```
+
+之前沒出事，只是因為測試機與民眾A 的機器上剛好沒有第三方掛載。
+
+### 第三方怎麼掛進「本機」
+
+在 `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{CLSID}`
+註冊一個 CLSID 就好，任何軟體都能做，**不需要是磁碟機也不需要對應到檔案系統**。
+（[Microsoft Learn](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/cc144096(v=vs.85))）
+
+實務上「本機」底下至少有四種型態：磁碟機、使用者資料夾、
+**可攜式裝置**、**第三方 namespace extension**。
+
+### ★ 正面證據：WPD 裝置介面
+
+WPD 裝置的解析名稱有固定結構：
+
+```
+::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\\?\usb#vid_05ac&pid_12a8#<序號>#{6ac27878-a6fa-4155-ba85-f98f491d4f33}
+   ^^^^^^^^ 本機的 CLSID                 ^^^^^^ 裝置介面路徑              ^^^^^^^^ GUID_DEVINTERFACE_WPD
+```
+
+- **`{6AC27878-A6FA-4155-BA85-F98F491D4F33}` = `GUID_DEVINTERFACE_WPD`**
+  （[官方文件](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-wpd)）。
+  所有 WPD 驅動都會註冊這個介面。
+- **`{35786D3C-B075-49b9-88DD-029876E11C01}` = 「Portable Devices」** delegate folder。
+
+第三方 namespace extension 則是 `::{自己的 CLSID}`，不會有這些東西。
+
+`shell_ns.looks_like_portable_device()` 就是在測這三個特徵。
+**刻意測 `\\?\` 與 WPD GUID 而不是測 `usb#`** ——
+MTP over IP / Bluetooth 的裝置沒有 `usb#`，但仍有 WPD 介面 GUID。
+
+### 「不確定」要誠實表達，不要硬猜
+
+判斷改成三值（`CONFIRMED` / `LIKELY` / `EXCLUDED`），
+分不出來時回 `DeviceStatus.AMBIGUOUS`，把候選列給使用者自己選。詳見決策 D17。
+
+**「挑第一個 probe 成功的」擋不住這種情況** —— CopyTrans Studio 真的有內容
+（`Photo library` 底下有 Albums、Camera roll…），probe 一樣會過。
+
+### GetAttributesOf 只回傳你問到的位元
+
+```python
+folder.GetAttributesOf([pidl], mask)   # 回傳值已經跟 mask 做過 AND
+```
+
+以前只問 `FOLDER|FILESYSTEM`，所以 `0x20000000` 的意思是
+「**在我問的兩個位元裡**只有 FOLDER」，**不代表其他位元是 0 —— 我們根本沒問**。
+
+現在 `DEFAULT_ATTRIBUTE_MASK` 多問了 `FILESYSANCESTOR / STORAGE / STREAM /
+STORAGEANCESTOR / REMOVABLE / BROWSABLE`。**同一次 COM 呼叫，零額外成本。**
+
+**這些位元目前只寫進診斷報告，不參與判斷** —— 先累積真實資料，
+確認 WPD 裝置與第三方掛載在這些位元上真的有穩定差異，再考慮採用。
+官方文件裡**沒有任何一個旗標被定義為「這是可攜式裝置」**，所以不能靠猜。
+
 ## 裝置偵測的正確依據
 
 **實測資料（2026-08-29，繁體中文 Windows 10）：**
